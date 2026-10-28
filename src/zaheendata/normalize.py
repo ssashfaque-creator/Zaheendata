@@ -78,7 +78,9 @@ def looks_like_company(value: str | None) -> bool:
         return True
     if "," in text:
         return False
-    return text.isupper() and len(text.split()) >= 3
+    # ALL CAPS 5+ tokens is usually a firm. 2–4 tokens is often a person
+    # on license files ("CHARLES RAY WILKS").
+    return text.isupper() and len(text.split()) >= 5
 
 
 PERSON_STOPWORDS = {
@@ -117,7 +119,9 @@ def person_display_name(value: str | None) -> str:
     text = fold(value)
     if "," in text:
         last, first = [part.strip() for part in text.split(",", 1)]
-        return f"{first} {last}".strip()
+        text = f"{first} {last}".strip()
+    if text.isupper():
+        text = text.title()
     return text
 
 
@@ -200,6 +204,39 @@ def email_is_role_account(email: str | None) -> bool:
 
 def token_set(value: str | None) -> set[str]:
     return {token for token in normalize_name(value).split() if len(token) > 1}
+
+
+TRADE_NAME_TOKENS = {
+    "ac",
+    "air",
+    "austin",
+    "and",
+    "company",
+    "conditioning",
+    "comfort",
+    "heating",
+    "htg",
+    "hvac",
+    "inc",
+    "llc",
+    "mechanical",
+    "of",
+    "plumbing",
+    "plumber",
+    "service",
+    "services",
+    "texas",
+    "the",
+}
+
+
+def distinctive_name_key(value: str | None) -> str:
+    tokens = [
+        token
+        for token in normalize_name(value).split()
+        if token not in TRADE_NAME_TOKENS and len(token) > 2
+    ]
+    return "".join(tokens)
 
 
 def name_similarity(left: str | None, right: str | None) -> float:

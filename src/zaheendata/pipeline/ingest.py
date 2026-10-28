@@ -11,10 +11,11 @@ from zaheendata.normalize import (
     domain_from_url,
     email_is_role_account,
     is_own_website,
+    distinctive_name_key,
     looks_like_person,
     name_key,
-    name_similarity,
     normalize_phone,
+    person_display_name,
     phone_key,
 )
 from zaheendata.warehouse import connect
@@ -202,6 +203,11 @@ def attach_warehouse_overlays(leads: list[Lead], warehouse: Path | None = None) 
     con.close()
     lic_by_key = {row[6]: row for row in licenses if row[6]}
     lic_by_phone = {phone_key(row[5]): row for row in licenses if row[5]}
+    lic_by_distinct: dict[str, list] = {}
+    for row in licenses:
+        distinct = distinctive_name_key(row[0])
+        if distinct:
+            lic_by_distinct.setdefault(distinct, []).append(row)
     ppp_by_key = {row[3]: row for row in ppp_rows if row[3]}
 
     def _license_for(lead: Lead):
@@ -212,15 +218,10 @@ def attach_warehouse_overlays(leads: list[Lead], warehouse: Path | None = None) 
         phone = phone_key(lead.phone)
         if phone and phone in lic_by_phone:
             return lic_by_phone[phone]
-        best = None
-        best_score = 0.0
-        for row in licenses:
-            score = name_similarity(lead.name, row[0])
-            if score > best_score:
-                best_score = score
-                best = row
-        if best is not None and best_score >= 0.86:
-            return best
+        distinct = distinctive_name_key(lead.name)
+        candidates = lic_by_distinct.get(distinct, []) if distinct else []
+        if len(candidates) == 1:
+            return candidates[0]
         return None
 
     for lead in leads:
@@ -229,8 +230,9 @@ def attach_warehouse_overlays(leads: list[Lead], warehouse: Path | None = None) 
             lead.merge_source(lic[7] or "license")
             lead.license_number = lic[3] or lead.license_number
             lead.license_status = lic[4] or lead.license_status
-            if lic[2] or looks_like_person(lic[1]):
-                lead.owner_name = lic[1] or lead.owner_name
+            owner = person_display_name(lic[1]) if lic[1] else ""
+            if lic[2] or looks_like_person(owner) or looks_like_person(lic[1]):
+                lead.owner_name = owner or lead.owner_name
                 lead.owner_source = lic[7] or "license"
                 lead.owner_confidence = 0.8
                 lead.owner_title = lead.owner_title or "Owner / license holder"

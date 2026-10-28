@@ -121,3 +121,29 @@ def test_license_fuzzy_name_and_phone_match(tmp_path: Path) -> None:
     assert lead.license_number == "TACLA111"
     assert lead.owner_name == "Chuck Smith"
     assert "tx_tdlr_ac" in lead.sources
+
+
+def test_license_ignores_generic_heating_air_overlap(tmp_path: Path) -> None:
+    warehouse = tmp_path / "warehouse.duckdb"
+    licenses = tmp_path / "licenses.json"
+    licenses.write_text(
+        "["
+        '{"source":"tx_tdlr_ac","business_name":"Musgrave Heating and Air",'
+        '"owner_name":"JEFFREY ALLEN MUSGRAVE","owner_is_person":true,'
+        '"license_number":"101398","license_status":"active",'
+        '"phone":"","address":"","city_state_zip":"Austin TX","county":"TRAVIS"},'
+        '{"source":"tx_tdlr_ac","business_name":"Chucks Air Conditioning LLC",'
+        '"owner_name":"CHARLES RAY WILKS","owner_is_person":true,'
+        '"license_number":"4791","license_status":"active",'
+        '"phone":"","address":"","city_state_zip":"Buda TX","county":"HAYS"}'
+        "]",
+        encoding="utf-8",
+    )
+    ingest_license_json(licenses, warehouse, state="TX")
+    bee = empty_lead(name="Bee Comfortable Heating and Air", website="https://beecomfortabletexas.com/")
+    chuck = empty_lead(name="Chuck's Air Conditioning", website="https://chucksac.com/")
+    attach_warehouse_overlays([bee, chuck], warehouse)
+    assert bee.license_number == ""
+    assert bee.owner_name == ""
+    assert chuck.license_number == "4791"
+    assert chuck.owner_name == "Charles Ray Wilks"
