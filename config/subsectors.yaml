@@ -1,0 +1,257 @@
+# Sub-sector registry. One entry per target sub-sector from the brief.
+#
+#   naics              NAICS code used for vendor filters (Data Axle, D&B, ZoomInfo, Apollo).
+#   scope              Default geographic scope needed to reach ~100 good fits
+#                      (metro | state | national). Small sub-sectors need a wider area.
+#   cross_check        Sub-sector specific sources used to catch businesses vendors miss.
+#   queries            Keyword queries for maps-style sources (Google Places, Yelp, OSM).
+#   yelp_categories    Yelp Fusion category aliases.
+#   osm_tags           OpenStreetMap tag filters for Overpass.
+#   apollo_keywords    Industry keyword hints for Apollo / vendor search.
+#   fit_signal         The sub-sector specific "best-fit" signal, expressed as feature rules.
+#                      points = 2 when matched >= strong_threshold, 1 when >= 1, else 0.
+#                      Any matched negative feature with no positive match forces 0.
+#
+# Feature names resolve against the enriched Business (see zaheendata/scoring/features.py).
+
+version: 1
+subsectors:
+  plumbing_hvac:
+    name: Plumbing, heating and HVAC
+    naics: "238220"
+    scope: metro
+    cross_check: [state_contractor_license, google_places, yelp]
+    queries: ["plumber", "plumbing contractor", "HVAC contractor", "heating and air conditioning", "furnace repair"]
+    yelp_categories: [plumbing, hvac, waterheaterinstallrepair]
+    osm_tags: ["craft=plumber", "craft=hvac", "shop=hvac"]
+    apollo_keywords: ["plumbing", "hvac", "heating and air conditioning"]
+    fit_signal:
+      description: Offers emergency service and maintenance plans
+      features: [emergency_service, maintenance_plan]
+      strong_threshold: 2
+
+  electrical:
+    name: Electrical contractors
+    naics: "238210"
+    scope: metro
+    cross_check: [state_electrical_license, google_places, yelp]
+    queries: ["electrician", "electrical contractor", "residential electrician"]
+    yelp_categories: [electricians]
+    osm_tags: ["craft=electrician"]
+    apollo_keywords: ["electrical contractor", "electrician"]
+    fit_signal:
+      description: Residential service work rather than commercial bids
+      features: [residential_focus, emergency_service]
+      negative_features: [commercial_only]
+      strong_threshold: 2
+
+  landscaping:
+    name: Landscaping
+    naics: "561730"
+    scope: metro
+    cross_check: [google_places, thumbtack, yelp]
+    queries: ["landscaping company", "lawn care service", "landscape maintenance"]
+    yelp_categories: [landscaping, lawnservices]
+    osm_tags: ["craft=gardener", "shop=garden_centre", "office=landscaping"]
+    apollo_keywords: ["landscaping", "lawn care"]
+    fit_signal:
+      description: Recurring maintenance contracts and several crews
+      features: [recurring_service, multiple_crews_or_staff]
+      strong_threshold: 2
+
+  residential_remodelers:
+    name: Residential remodelers
+    naics: "236118"
+    scope: metro
+    cross_check: [houzz, state_contractor_license, google_places]
+    queries: ["home remodeling contractor", "kitchen remodeler", "bathroom remodeling", "general contractor residential"]
+    yelp_categories: [contractors, homeremodeling]
+    osm_tags: ["craft=builder", "office=construction_company"]
+    apollo_keywords: ["remodeling", "home improvement contractor"]
+    fit_signal:
+      description: Many estimates per month; project gallery online
+      features: [project_gallery, free_estimate, has_quote_form]
+      strong_threshold: 2
+
+  roofing:
+    name: Roofing
+    naics: "238160"
+    scope: metro
+    cross_check: [state_contractor_license, google_places, yelp]
+    queries: ["roofing contractor", "roofer", "roof repair"]
+    yelp_categories: [roofing]
+    osm_tags: ["craft=roofer"]
+    apollo_keywords: ["roofing"]
+    fit_signal:
+      description: Inspection request form; insurance and storm work
+      features: [inspection_request, insurance_storm_work]
+      strong_threshold: 2
+
+  pest_control:
+    name: Pest control
+    naics: "561710"
+    scope: state
+    cross_check: [state_pest_control_license, google_places, yelp]
+    queries: ["pest control", "exterminator", "termite control"]
+    yelp_categories: [pest_control]
+    osm_tags: ["shop=pest_control", "craft=pest_control"]
+    apollo_keywords: ["pest control", "exterminator"]
+    fit_signal:
+      description: Quarterly service plans with recurring billing
+      features: [recurring_service, maintenance_plan]
+      strong_threshold: 2
+
+  painting:
+    name: Painting
+    naics: "238320"
+    scope: metro
+    cross_check: [angi, thumbtack, google_places]
+    queries: ["painting contractor", "house painter", "residential painting"]
+    yelp_categories: [painters]
+    osm_tags: ["craft=painter"]
+    apollo_keywords: ["painting contractor"]
+    fit_signal:
+      description: Residential work with "free estimate" offers
+      features: [residential_focus, free_estimate]
+      strong_threshold: 2
+
+  other_building_services:
+    name: Other building services (pool, gutter, chimney, pressure washing)
+    naics: "561790"
+    scope: state
+    cross_check: [google_places, yelp]
+    queries: ["pool service", "pool cleaning", "gutter cleaning", "chimney sweep", "pressure washing"]
+    yelp_categories: [poolcleaners, gutterservices, chimneysweeps, pressurewashers]
+    osm_tags: ["craft=chimney_sweeper", "shop=swimming_pool"]
+    apollo_keywords: ["pool service", "gutter cleaning", "pressure washing", "chimney"]
+    fit_signal:
+      description: Recurring route-based service
+      features: [recurring_service, maintenance_plan]
+      strong_threshold: 1
+
+  beauty_salons:
+    name: Beauty salons
+    naics: "812112"
+    scope: metro
+    cross_check: [state_cosmetology_license, vagaro, fresha, booksy, google_places]
+    queries: ["hair salon", "beauty salon"]
+    yelp_categories: [hair, beautysvc]
+    osm_tags: ["shop=hairdresser", "shop=beauty"]
+    apollo_keywords: ["hair salon", "beauty salon"]
+    fit_signal:
+      description: 5+ chairs, sells retail products, phone-only or basic booking
+      features: [five_plus_chairs, retail_products, no_online_booking]
+      strong_threshold: 2
+
+  nail_salons:
+    name: Nail salons
+    naics: "812113"
+    scope: metro
+    cross_check: [state_cosmetology_license, google_places, yelp]
+    queries: ["nail salon", "manicure pedicure"]
+    yelp_categories: [othersalons, nailsalons]
+    osm_tags: ["shop=beauty", "beauty=nails"]
+    apollo_keywords: ["nail salon"]
+    fit_signal:
+      description: Walk-in heavy, sells gift cards, no online booking
+      features: [walk_ins_welcome, sells_gift_cards, no_online_booking]
+      strong_threshold: 2
+
+  janitorial:
+    name: Janitorial
+    naics: "561720"
+    scope: metro
+    cross_check: [state_business_registration, issa_directory, google_places]
+    queries: ["commercial cleaning service", "janitorial service", "office cleaning"]
+    yelp_categories: [officecleaning, homecleaning]
+    osm_tags: ["craft=cleaning", "office=cleaning", "shop=cleaning"]
+    apollo_keywords: ["janitorial", "commercial cleaning"]
+    fit_signal:
+      description: Several commercial clients and staff schedules
+      features: [commercial_clients, multiple_crews_or_staff]
+      strong_threshold: 2
+
+  florists:
+    name: Florists
+    naics: "453110"
+    scope: state
+    cross_check: [saf_directory, ftd_directory, teleflora_directory, google_places]
+    queries: ["florist", "flower shop"]
+    yelp_categories: [florists]
+    osm_tags: ["shop=florist"]
+    apollo_keywords: ["florist", "flower shop"]
+    fit_signal:
+      description: Wedding and event work; own online store, not wire orders only
+      features: [wedding_event_work, online_store]
+      negative_features: [wire_service_only]
+      strong_threshold: 2
+
+  pet_supply_stores:
+    name: Pet-supply stores
+    naics: "453910"
+    scope: state
+    cross_check: [google_places, faire, yelp]
+    queries: ["pet store", "pet supply store", "pet shop grooming"]
+    yelp_categories: [petstore]
+    osm_tags: ["shop=pet"]
+    apollo_keywords: ["pet store", "pet supplies"]
+    fit_signal:
+      description: In-store grooming (bookings plus retail)
+      features: [grooming_services, retail_products, has_online_booking]
+      strong_threshold: 2
+
+  sporting_goods_stores:
+    name: Sporting-goods stores
+    naics: "451110"
+    scope: state
+    cross_check: [google_places, nsga_directory, yelp]
+    queries: ["sporting goods store", "team sports store", "team uniforms"]
+    yelp_categories: [sportgoods]
+    osm_tags: ["shop=sports"]
+    apollo_keywords: ["sporting goods"]
+    fit_signal:
+      description: Team and uniform sales needing quotes and invoices
+      features: [team_uniform_sales, has_quote_form]
+      strong_threshold: 2
+
+  gift_souvenir_stores:
+    name: Gift and souvenir stores
+    naics: "453220"
+    scope: state
+    cross_check: [faire, downtown_associations, google_places]
+    queries: ["gift shop", "souvenir shop", "boutique gift store"]
+    yelp_categories: [giftshops]
+    osm_tags: ["shop=gift"]
+    apollo_keywords: ["gift shop"]
+    fit_signal:
+      description: Sells in-store and on Shopify or Etsy
+      features: [store_on_shopify_or_etsy]
+      strong_threshold: 1
+
+  womens_clothing_stores:
+    name: Women's clothing stores
+    naics: "448120"
+    scope: state
+    cross_check: [instagram, shopify_store_pages, google_places]
+    queries: ["women's clothing boutique", "women's boutique", "womens clothing store"]
+    yelp_categories: [womenscloth]
+    osm_tags: ["shop=clothes", "clothes=women"]
+    apollo_keywords: ["women's boutique", "women's clothing"]
+    fit_signal:
+      description: Sells through Instagram or live sales as well as the shop
+      features: [instagram_shop_signals, instagram_present, online_store]
+      strong_threshold: 2
+
+  hobby_toy_game_stores:
+    name: Hobby, toy and game stores
+    naics: "451120"
+    scope: national
+    cross_check: [astra_directory, game_publisher_store_locators, google_places]
+    queries: ["game store", "hobby shop", "toy store", "comic and game store", "tabletop game store"]
+    yelp_categories: [hobbyshops, toys, tabletopgames]
+    osm_tags: ["shop=games", "shop=toys", "shop=hobby", "shop=model"]
+    apollo_keywords: ["hobby shop", "game store", "toy store"]
+    fit_signal:
+      description: Hosts events or tournaments; has an online store
+      features: [hosts_events, online_store]
+      strong_threshold: 2

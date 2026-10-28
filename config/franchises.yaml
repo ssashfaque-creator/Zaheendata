@@ -1,0 +1,218 @@
+# Known franchise / chain brands per sub-sector family. Matching is case-insensitive on the
+# business name (word-boundary) and on the website domain. Extend freely; the detector also
+# applies structural heuristics (shared domains / phones across many addresses, "franchise"
+# language on the website, >= min_locations_for_chain locations mentioned).
+min_locations_for_chain: 4
+
+brands:
+  home_services:
+    - Roto-Rooter
+    - Mr. Rooter
+    - Benjamin Franklin Plumbing
+    - One Hour Heating
+    - One Hour Air Conditioning
+    - ARS Rescue Rooter
+    - Aire Serv
+    - Mr. Electric
+    - Mister Sparky
+    - Service Experts
+    - Horizon Services
+    - Bath Fitter
+    - Re-Bath
+    - Dreamstyle Remodeling
+    - Mr. Handyman
+    - Handyman Connection
+    - Kitchen Tune-Up
+    - DreamMaker Bath & Kitchen
+    - Five Star Painting
+    - CertaPro Painters
+    - WOW 1 DAY PAINTING
+    - Fresh Coat Painters
+    - 360 Painting
+    - Terminix
+    - Orkin
+    - Truly Nolen
+    - Aptive Environmental
+    - Mosquito Joe
+    - Mosquito Squad
+    - Mosquito Authority
+    - Rentokil
+    - Arrow Exterminators
+    - Lawn Doctor
+    - TruGreen
+    - Weed Man
+    - The Grounds Guys
+    - U.S. Lawns
+    - BrightView
+    - Spring-Green
+    - NaturaLawn
+    - Pool Scouts
+    - ASP America's Swimming Pool Company
+    - Leslie's
+    - The Gutter Guys
+    - LeafFilter
+    - Gutter Helmet
+    - Window Genie
+    - Men In Kilts
+    - Shack Shine
+    - Conserva Irrigation
+    - Erie Home
+    - Power Home Remodeling
+    - Mr. Roof
+    - Best Choice Roofing
+    - Long Roofing
+    - Roof Maxx
+    - Storm Guard Roofing
+  cleaning:
+    - Jan-Pro
+    - Jani-King
+    - Coverall
+    - Vanguard Cleaning Systems
+    - Anago Cleaning Systems
+    - Stratus Building Solutions
+    - Office Pride
+    - Buildingstars
+    - Molly Maid
+    - Merry Maids
+    - The Cleaning Authority
+    - MaidPro
+    - Two Maids
+    - ServiceMaster Clean
+    - Stanley Steemer
+    - Chem-Dry
+    - City Wide Facility Solutions
+    - System4
+    - OpenWorks
+  beauty:
+    - Supercuts
+    - Great Clips
+    - Sport Clips
+    - Fantastic Sams
+    - Cost Cutters
+    - SmartStyle
+    - Regis Salons
+    - Hair Cuttery
+    - Ulta Beauty
+    - Drybar
+    - Blo Blow Dry Bar
+    - Floyd's 99 Barbershop
+    - Roosters Men's Grooming
+    - Lady Jane's
+    - The Lash Lounge
+    - Amazing Lash Studio
+    - European Wax Center
+    - Waxing the City
+    - Regal Nails
+    - Nail Bar
+    - Frenchies Modern Nail Care
+    - MiniLuxe
+    - Sola Salon Studios
+    - Phenix Salon Suites
+    - Salons by JC
+    - Salon Lofts
+    - Boardroom Salon for Men
+  retail:
+    - Petco
+    - PetSmart
+    - Pet Supplies Plus
+    - Pet Valu
+    - Petland
+    - Pet Supermarket
+    - Pet Food Express
+    - Hollywood Feed
+    - Chuck & Don's
+    - Kriser's
+    - Woof Gang Bakery
+    - EarthWise Pet
+    - Wag N' Wash
+    - Just Food For Dogs
+    - Dick's Sporting Goods
+    - Academy Sports
+    - Big 5 Sporting Goods
+    - Hibbett Sports
+    - Scheels
+    - Dunham's Sports
+    - Play It Again Sports
+    - Modell's
+    - Bass Pro Shops
+    - Cabela's
+    - REI
+    - Fleet Feet
+    - Road Runner Sports
+    - Soccer.com
+    - Hallmark
+    - Spencer's
+    - Things Remembered
+    - Kirkland's
+    - Cracker Barrel
+    - Five Below
+    - Francesca's
+    - Apricot Lane
+    - Altar'd State
+    - Lululemon
+    - Loft
+    - Chico's
+    - Torrid
+    - Maurices
+    - Buckle
+    - Cato
+    - Rue21
+    - Dress Barn
+    - Lane Bryant
+    - Anthropologie
+    - Charlotte Russe
+    - Games Workshop
+    - Warhammer
+    - GameStop
+    - Hobby Lobby
+    - HobbyTown
+    - Michaels
+    - Learning Express Toys
+    - Toys R Us
+    - Build-A-Bear
+    - Lego Store
+    - Edible Arrangements
+    - 1-800-Flowers
+    - KaBloom
+    - Flowerama
+    - ProFlowers
+
+domains:
+  - rotorooter.com
+  - mrrooter.com
+  - benjaminfranklinplumbing.com
+  - onehourheatandair.com
+  - ars.com
+  - aireserv.com
+  - mrelectric.com
+  - mistersparky.com
+  - certapro.com
+  - fivestarpainting.com
+  - terminix.com
+  - orkin.com
+  - trugreen.com
+  - lawndoctor.com
+  - groundsguys.com
+  - janpro.com
+  - janiking.com
+  - coverall.com
+  - mollymaid.com
+  - merrymaids.com
+  - supercuts.com
+  - greatclips.com
+  - sportclips.com
+  - fantasticsams.com
+  - regalnails.com
+  - petco.com
+  - petsmart.com
+  - petsuppliesplus.com
+  - dickssportinggoods.com
+  - academy.com
+  - hibbett.com
+  - playitagainsports.com
+  - hallmark.com
+  - 1800flowers.com
+  - ediblearrangements.com
+  - hobbytown.com
+  - learningexpress.com
+  - gamestop.com

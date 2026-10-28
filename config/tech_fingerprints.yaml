@@ -1,0 +1,305 @@
+# Wappalyzer-style fingerprints evaluated against the crawled website (HTML, script src,
+# link href, meta tags, cookies/headers). Each technology has a category; the "uses several
+# separate tools" signal counts distinct categories. Patterns are case-insensitive regexes.
+#
+#   html     : matched against the raw HTML of any crawled page
+#   scripts  : matched against <script src> URLs
+#   headers  : matched against "Header-Name: value" lines
+#   domains  : matched against hostnames of any link / script / iframe on the page
+
+technologies:
+  # ---- payments -----------------------------------------------------------
+  - name: Square
+    category: payments
+    scripts: ["squareup\\.com", "squarecdn\\.com", "js\\.squareup\\.com"]
+    html: ["squareup\\.com/(appointments|store|checkout|gift)", "square-online"]
+    domains: ["squareup.com", "square.site", "square.link"]
+  - name: Stripe
+    category: payments
+    scripts: ["js\\.stripe\\.com"]
+    html: ["buy\\.stripe\\.com", "checkout\\.stripe\\.com"]
+  - name: PayPal
+    category: payments
+    scripts: ["paypal\\.com/sdk", "paypalobjects\\.com"]
+    html: ["paypal\\.com/(cgi-bin|donate|ncp)", "paypal\\.me/"]
+  - name: Clover
+    category: payments
+    domains: ["clover.com"]
+    html: ["clover\\.com/online-ordering", "clover\\.com/pay"]
+  - name: Affirm
+    category: financing
+    scripts: ["cdn1\\.affirm\\.com"]
+  - name: Wisetack
+    category: financing
+    html: ["wisetack"]
+  - name: GreenSky
+    category: financing
+    html: ["greensky"]
+
+  # ---- ecommerce ----------------------------------------------------------
+  - name: Shopify
+    category: ecommerce
+    scripts: ["cdn\\.shopify\\.com", "shopifycloud"]
+    html: ["Shopify\\.theme", "myshopify\\.com", "cdn\\.shopify\\.com"]
+    headers: ["x-shopid", "x-shopify-stage"]
+  - name: WooCommerce
+    category: ecommerce
+    html: ["woocommerce", "wc-ajax", "wp-content/plugins/woocommerce"]
+  - name: BigCommerce
+    category: ecommerce
+    html: ["cdn\\d*\\.bigcommerce\\.com", "bigcommerce\\.com"]
+  - name: Etsy
+    category: ecommerce
+    domains: ["etsy.com"]
+    html: ["etsy\\.com/shop/"]
+  - name: Square Online
+    category: ecommerce
+    html: ["square\\.site", "squareup\\.com/store", "weeblycloud"]
+  - name: Ecwid
+    category: ecommerce
+    scripts: ["app\\.ecwid\\.com", "ecwid\\.com/script"]
+  - name: Wix Stores
+    category: ecommerce
+    html: ["wixstores", "wix-stores"]
+  - name: Faire
+    category: wholesale
+    domains: ["faire.com"]
+
+  # ---- booking / scheduling ----------------------------------------------
+  - name: Vagaro
+    category: booking
+    domains: ["vagaro.com"]
+    scripts: ["vagaro\\.com"]
+  - name: Fresha
+    category: booking
+    domains: ["fresha.com"]
+  - name: Booksy
+    category: booking
+    domains: ["booksy.com"]
+  - name: Square Appointments
+    category: booking
+    html: ["squareup\\.com/appointments", "square\\.site/book"]
+  - name: Acuity Scheduling
+    category: booking
+    scripts: ["acuityscheduling\\.com", "squarespacescheduling"]
+    domains: ["acuityscheduling.com", "squarespacescheduling.com"]
+  - name: Calendly
+    category: booking
+    scripts: ["assets\\.calendly\\.com"]
+    domains: ["calendly.com"]
+  - name: Mindbody
+    category: booking
+    scripts: ["mindbodyonline\\.com", "brandedweb\\.mindbodyonline"]
+    domains: ["mindbodyonline.com"]
+  - name: Schedulicity
+    category: booking
+    domains: ["schedulicity.com"]
+  - name: Setmore
+    category: booking
+    domains: ["setmore.com"]
+  - name: GlossGenius
+    category: booking
+    domains: ["glossgenius.com"]
+  - name: StyleSeat
+    category: booking
+    domains: ["styleseat.com"]
+  - name: Boulevard
+    category: booking
+    domains: ["joinblvd.com", "blvd.co"]
+  - name: Housecall Pro
+    category: field_service
+    scripts: ["housecallpro\\.com", "book\\.housecallpro"]
+    domains: ["housecallpro.com"]
+  - name: Jobber
+    category: field_service
+    scripts: ["getjobber\\.com", "clienthub\\.getjobber"]
+    domains: ["getjobber.com"]
+  - name: ServiceTitan
+    category: field_service
+    scripts: ["servicetitan\\.com", "static\\.servicetitan"]
+    domains: ["servicetitan.com"]
+  - name: Service Fusion
+    category: field_service
+    domains: ["servicefusion.com"]
+  - name: Workiz
+    category: field_service
+    domains: ["workiz.com"]
+  - name: FieldEdge
+    category: field_service
+    domains: ["fieldedge.com"]
+  - name: Thryv
+    category: field_service
+    scripts: ["thryv\\.com"]
+  - name: Gingr
+    category: booking
+    domains: ["gingrapp.com"]
+  - name: PetExec
+    category: booking
+    domains: ["petexec.net"]
+  - name: Tockify
+    category: events
+    domains: ["tockify.com"]
+  - name: Eventbrite
+    category: events
+    domains: ["eventbrite.com"]
+  - name: Meetup
+    category: events
+    domains: ["meetup.com"]
+
+  # ---- marketing / email --------------------------------------------------
+  - name: Mailchimp
+    category: email_marketing
+    scripts: ["chimpstatic\\.com", "list-manage\\.com", "mailchimp\\.com"]
+    html: ["list-manage\\.com", "mc4wp"]
+  - name: Constant Contact
+    category: email_marketing
+    scripts: ["ctctcdn\\.com", "constantcontact\\.com"]
+    html: ["constantcontact\\.com"]
+  - name: Klaviyo
+    category: email_marketing
+    scripts: ["static\\.klaviyo\\.com", "klaviyo\\.com"]
+  - name: HubSpot
+    category: crm
+    scripts: ["js\\.hs-scripts\\.com", "hsforms\\.net", "hubspot\\.com"]
+  - name: ActiveCampaign
+    category: email_marketing
+    scripts: ["activehosted\\.com", "activecampaign\\.com"]
+  - name: Podium
+    category: reputation
+    scripts: ["connect\\.podium\\.com", "podium\\.com"]
+  - name: Birdeye
+    category: reputation
+    scripts: ["birdeye\\.com"]
+  - name: NiceJob
+    category: reputation
+    scripts: ["nicejob\\.com"]
+  - name: Yext
+    category: listings
+    scripts: ["yext\\.com", "yextpages"]
+  - name: Google Analytics
+    category: analytics
+    scripts: ["googletagmanager\\.com/gtag", "google-analytics\\.com/analytics\\.js"]
+    html: ["G-[A-Z0-9]{8,}", "UA-\\d{4,}-\\d"]
+  - name: Google Tag Manager
+    category: analytics
+    scripts: ["googletagmanager\\.com/gtm\\.js"]
+    html: ["GTM-[A-Z0-9]{4,}"]
+  - name: Meta Pixel
+    category: analytics
+    scripts: ["connect\\.facebook\\.net/.*/fbevents\\.js"]
+    html: ["fbq\\('init'"]
+  - name: CallRail
+    category: call_tracking
+    scripts: ["callrail\\.com", "cdn\\.callrail"]
+  - name: Intercom
+    category: live_chat
+    scripts: ["widget\\.intercom\\.io"]
+  - name: Tidio
+    category: live_chat
+    scripts: ["code\\.tidio\\.co"]
+  - name: Drift
+    category: live_chat
+    scripts: ["js\\.driftt\\.com"]
+  - name: LiveChat
+    category: live_chat
+    scripts: ["cdn\\.livechatinc\\.com"]
+  - name: Tawk.to
+    category: live_chat
+    scripts: ["embed\\.tawk\\.to"]
+  - name: Zendesk
+    category: live_chat
+    scripts: ["static\\.zdassets\\.com", "zendesk\\.com"]
+
+  # ---- forms / quotes -----------------------------------------------------
+  - name: Typeform
+    category: forms
+    domains: ["typeform.com"]
+  - name: JotForm
+    category: forms
+    scripts: ["jotform\\.com"]
+    domains: ["jotform.com", "form.jotform.com"]
+  - name: Gravity Forms
+    category: forms
+    html: ["gform_wrapper", "gravityforms"]
+  - name: Contact Form 7
+    category: forms
+    html: ["wpcf7", "contact-form-7"]
+  - name: WPForms
+    category: forms
+    html: ["wpforms"]
+  - name: Google Forms
+    category: forms
+    domains: ["docs.google.com"]
+
+  # ---- accounting / invoicing (rarely visible, but sometimes linked) --------
+  - name: QuickBooks
+    category: accounting
+    html: ["quickbooks\\.intuit\\.com", "connect\\.intuit\\.com", "intuit\\.com/pay"]
+  - name: FreshBooks
+    category: accounting
+    domains: ["freshbooks.com"]
+  - name: Wave
+    category: accounting
+    domains: ["waveapps.com"]
+  - name: Gift Up
+    category: gift_cards
+    domains: ["giftup.app", "giftup.com"]
+  - name: Toast Gift Cards
+    category: gift_cards
+    domains: ["toasttab.com"]
+
+  # ---- platforms / CMS ----------------------------------------------------
+  - name: WordPress
+    category: cms
+    html: ["wp-content/", "wp-includes/", "<meta name=\"generator\" content=\"WordPress"]
+  - name: Wix
+    category: cms
+    html: ["static\\.wixstatic\\.com", "wix\\.com", "X-Wix-"]
+    scripts: ["static\\.parastorage\\.com"]
+  - name: Squarespace
+    category: cms
+    html: ["static1\\.squarespace\\.com", "squarespace\\.com"]
+  - name: GoDaddy Website Builder
+    category: cms
+    html: ["img1\\.wsimg\\.com", "godaddy\\.com/websites"]
+  - name: Weebly
+    category: cms
+    html: ["weebly\\.com", "editmysite\\.com"]
+  - name: Duda
+    category: cms
+    html: ["dudamobile", "duda\\.co", "d-cdn\\.multiscreensite"]
+  - name: Webflow
+    category: cms
+    html: ["webflow\\.com", "data-wf-site"]
+  - name: Google Sites
+    category: cms
+    html: ["sites\\.google\\.com"]
+
+  # ---- social commerce ----------------------------------------------------
+  - name: Instagram
+    category: social
+    domains: ["instagram.com"]
+  - name: Facebook
+    category: social
+    domains: ["facebook.com", "fb.com"]
+  - name: TikTok
+    category: social
+    domains: ["tiktok.com"]
+  - name: CommentSold
+    category: live_selling
+    domains: ["commentsold.com"]
+  - name: Shopify Live
+    category: live_selling
+    html: ["shopify.*live"]
+  - name: Houzz
+    category: directory
+    domains: ["houzz.com"]
+  - name: Thumbtack
+    category: directory
+    domains: ["thumbtack.com"]
+  - name: Angi
+    category: directory
+    domains: ["angi.com", "angieslist.com", "homeadvisor.com"]
+  - name: Yelp
+    category: directory
+    domains: ["yelp.com"]

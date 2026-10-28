@@ -1,0 +1,129 @@
+[
+  {
+    "subsector_key": "plumbing_hvac",
+    "source": "google_places", "source_kind": "maps", "source_id": "ChIJ_hill_country",
+    "name": "Hill Country Plumbing & Air", "phone": "(512) 555-0101", "website": "https://www.hillcountryplumbingair.com",
+    "address": {"line1": "1200 S Lamar Blvd", "city": "Austin", "region": "TX", "postal_code": "78704", "formatted": "1200 S Lamar Blvd, Austin, TX 78704"},
+    "location": {"lat": 30.253, "lng": -97.763}, "categories": ["plumber", "hvac_contractor"],
+    "rating": 4.8, "review_count": 212, "business_status": "OPERATIONAL",
+    "reviews": [
+      {"author": "Dana", "rating": 5, "text": "Fast, friendly, fixed our water heater same day.", "days_ago": 4},
+      {"author": "Mike", "rating": 2, "text": "Great techs but the office never called me back about my invoice, and I was double charged.", "days_ago": 15},
+      {"author": "Priya", "rating": 5, "text": "Joined their comfort club, worth it.", "days_ago": 40},
+      {"author": "Tom", "rating": 4, "text": "Good work. Took a while to get a quote though.", "days_ago": 70},
+      {"author": "Lee", "rating": 5, "text": "Solid.", "days_ago": 120}
+    ]
+  },
+  {
+    "subsector_key": "plumbing_hvac",
+    "source": "apollo", "source_kind": "vendor", "source_id": "apollo-hc-1",
+    "name": "Hill Country Plumbing and Air LLC", "phone": "+1 512-555-0101", "website": "hillcountryplumbingair.com",
+    "address": {"city": "Austin", "region": "TX", "postal_code": "78704"}, "naics": "238220", "employee_count": 14,
+    "owner_name": "Marcus Reyes", "owner_title": "Owner", "linkedin_url": "https://www.linkedin.com/in/marcus-reyes-plumbing"
+  },
+  {
+    "subsector_key": "plumbing_hvac",
+    "source": "license:tx_tdlr_licenses", "source_kind": "license", "source_id": "TACLA0001",
+    "name": "HILL COUNTRY PLUMBING & AIR", "phone": "5125550101",
+    "address": {"line1": "1200 S LAMAR BLVD", "city": "AUSTIN", "region": "TX", "postal_code": "78704"},
+    "license_number": "TACLA0001", "license_status": "Active", "categories": ["Air Conditioning and Refrigeration Contractor"]
+  },
+  {
+    "subsector_key": "plumbing_hvac",
+    "source": "google_places", "source_kind": "maps", "source_id": "ChIJ_barton",
+    "name": "Barton Springs Plumbing", "phone": "(512) 555-0102", "website": "https://bartonspringsplumbing.com",
+    "address": {"line1": "2100 Barton Springs Rd", "city": "Austin", "region": "TX", "postal_code": "78704", "formatted": "2100 Barton Springs Rd, Austin, TX 78704"},
+    "location": {"lat": 30.264, "lng": -97.771}, "categories": ["plumber"],
+    "rating": 4.6, "review_count": 88, "business_status": "OPERATIONAL",
+    "reviews": [
+      {"author": "A", "rating": 5, "text": "Showed up on time, fair price.", "days_ago": 200},
+      {"author": "B", "rating": 1, "text": "Left three voicemails and nobody called back for a week.", "days_ago": 260},
+      {"author": "C", "rating": 4, "text": "Fine.", "days_ago": 300}
+    ]
+  },
+  {
+    "subsector_key": "plumbing_hvac",
+    "source": "google_places", "source_kind": "maps", "source_id": "ChIJ_rotorooter",
+    "name": "Roto-Rooter Plumbing & Water Cleanup", "phone": "(512) 555-0103", "website": "https://www.rotorooter.com/austin/",
+    "address": {"line1": "8000 Research Blvd", "city": "Austin", "region": "TX", "postal_code": "78758", "formatted": "8000 Research Blvd, Austin, TX 78758"},
+    "location": {"lat": 30.36, "lng": -97.72}, "categories": ["plumber"],
+    "rating": 4.5, "review_count": 1800, "business_status": "OPERATIONAL"
+  },
+  {
+    "subsector_key": "plumbing_hvac",
+    "source": "google_places", "source_kind": "maps", "source_id": "ChIJ_nowebsite",
+    "name": "Jose's Plumbing Service", "phone": "(512) 555-0104",
+    "address": {"line1": "4500 E Riverside Dr", "city": "Austin", "region": "TX", "postal_code": "78741", "formatted": "4500 E Riverside Dr, Austin, TX 78741"},
+    "location": {"lat": 30.235, "lng": -97.715}, "categories": ["plumber"],
+    "rating": 4.9, "review_count": 64, "business_status": "OPERATIONAL"
+  },
+  {
+    "subsector_key": "plumbing_hvac",
+    "source": "google_places", "source_kind": "maps", "source_id": "ChIJ_tiny",
+    "name": "Capital City Drain Pros", "phone": "(512) 555-0105", "website": "https://capitalcitydrainpros.com",
+    "address": {"line1": "300 W 6th St", "city": "Austin", "region": "TX", "postal_code": "78701", "formatted": "300 W 6th St, Austin, TX 78701"},
+    "location": {"lat": 30.268, "lng": -97.746}, "categories": ["plumber"],
+    "rating": 5.0, "review_count": 6, "business_status": "OPERATIONAL"
+  },
+  {
+    "subsector_key": "plumbing_hvac",
+    "source": "google_places", "source_kind": "maps", "source_id": "ChIJ_dallas",
+    "name": "Big D Heating & Air", "phone": "(214) 555-0106", "website": "https://bigdheatingair.com",
+    "address": {"line1": "100 Main St", "city": "Dallas", "region": "TX", "postal_code": "75201", "formatted": "100 Main St, Dallas, TX 75201"},
+    "location": {"lat": 32.78, "lng": -96.80}, "categories": ["hvac_contractor"],
+    "rating": 4.7, "review_count": 140, "business_status": "OPERATIONAL"
+  },
+  {
+    "subsector_key": "plumbing_hvac",
+    "source": "google_places", "source_kind": "maps", "source_id": "ChIJ_closed",
+    "name": "Old Town Plumbing", "phone": "(512) 555-0107", "website": "https://oldtownplumbingatx.com",
+    "address": {"line1": "900 Congress Ave", "city": "Austin", "region": "TX", "postal_code": "78701", "formatted": "900 Congress Ave, Austin, TX 78701"},
+    "location": {"lat": 30.27, "lng": -97.742}, "categories": ["plumber"],
+    "rating": 4.1, "review_count": 55, "business_status": "CLOSED_PERMANENTLY"
+  },
+  {
+    "subsector_key": "plumbing_hvac",
+    "source": "google_places", "source_kind": "maps", "source_id": "ChIJ_lonestar",
+    "name": "Lone Star Comfort Systems", "phone": "(512) 555-0108", "website": "https://lonestarcomfort.com",
+    "address": {"line1": "5600 Burnet Rd", "city": "Austin", "region": "TX", "postal_code": "78756", "formatted": "5600 Burnet Rd, Austin, TX 78756"},
+    "location": {"lat": 30.33, "lng": -97.74}, "categories": ["hvac_contractor"],
+    "rating": 4.7, "review_count": 131, "business_status": "OPERATIONAL",
+    "reviews": [
+      {"author": "R", "rating": 5, "text": "Booked online, tech arrived in the window. Easy.", "days_ago": 3},
+      {"author": "S", "rating": 5, "text": "Second year on their maintenance plan.", "days_ago": 20},
+      {"author": "T", "rating": 5, "text": "Great.", "days_ago": 33},
+      {"author": "U", "rating": 4, "text": "Pricey but good.", "days_ago": 80}
+    ]
+  },
+  {
+    "subsector_key": "plumbing_hvac",
+    "source": "osm_overpass", "source_kind": "maps", "source_id": "node/1",
+    "name": "Lone Star Comfort Systems", "phone": "+1-512-555-0108", "website": "http://lonestarcomfort.com/",
+    "address": {"city": "Austin", "region": "TX", "postal_code": "78756"}, "location": {"lat": 30.3301, "lng": -97.7402},
+    "categories": ["craft=hvac"]
+  },
+  {
+    "subsector_key": "plumbing_hvac",
+    "source": "google_places", "source_kind": "maps", "source_id": "ChIJ_eastside",
+    "name": "Eastside Plumbing Co", "phone": "(512) 555-0109", "website": "https://eastsideplumbingatx.com",
+    "address": {"line1": "1800 E Cesar Chavez St", "city": "Austin", "region": "TX", "postal_code": "78702", "formatted": "1800 E Cesar Chavez St, Austin, TX 78702"},
+    "location": {"lat": 30.258, "lng": -97.725}, "categories": ["plumber"],
+    "rating": 4.4, "review_count": 47, "business_status": "OPERATIONAL",
+    "reviews": [
+      {"author": "V", "rating": 3, "text": "Work was fine but the bill was wrong twice and nobody responds to email.", "days_ago": 10}
+    ]
+  },
+  {
+    "subsector_key": "beauty_salons",
+    "source": "google_places", "source_kind": "maps", "source_id": "ChIJ_salon1",
+    "name": "Luxe Lane Salon", "phone": "(512) 555-0201", "website": "https://luxelanesalon.com",
+    "address": {"line1": "2000 S Congress Ave", "city": "Austin", "region": "TX", "postal_code": "78704", "formatted": "2000 S Congress Ave, Austin, TX 78704"},
+    "location": {"lat": 30.245, "lng": -97.75}, "categories": ["hair_salon", "beauty_salon"],
+    "rating": 4.7, "review_count": 96, "business_status": "OPERATIONAL",
+    "reviews": [
+      {"author": "K", "rating": 5, "text": "Love my stylist!", "days_ago": 6},
+      {"author": "L", "rating": 2, "text": "Called four times to book and never got a call back.", "days_ago": 12},
+      {"author": "M", "rating": 5, "text": "Best balayage in town.", "days_ago": 25}
+    ]
+  }
+]

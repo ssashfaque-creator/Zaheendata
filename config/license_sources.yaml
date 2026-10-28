@@ -1,0 +1,114 @@
+# State licence / registration lists used as sub-sector cross-check sources.
+#
+# Each entry is one dataset. ``type`` is ``socrata`` (SODA API, JSON, server-side filtering) or
+# ``csv`` (a downloadable extract). ``tags`` must match the sub-sector registry's cross_check
+# values; ``states`` restricts the dataset to campaigns in those states.
+# ``columns`` maps our fields (name, phone, website, line1, city, region, postal_code,
+# license_number, license_status, owner_name, categories) to dataset columns.
+# ``filters`` (socrata) is a SoQL $where fragment; ``{state}`` and ``{city}`` are substituted.
+# ``keyword_filter`` keeps rows whose licence type / category matches the regex (case-insensitive).
+#
+# Dataset IDs change; verify each one on the portal before a production run and add more states
+# the same way. Most states publish contractor, electrical, cosmetology and pest-control licence
+# rolls through Socrata, ArcGIS Hub, or a nightly CSV.
+
+datasets:
+  - key: tx_tdlr_licenses
+    name: Texas TDLR - all active licenses
+    type: socrata
+    states: [TX]
+    tags: [state_electrical_license, state_contractor_license, state_cosmetology_license]
+    url: https://data.texas.gov/resource/7358-krk7.json
+    filters: "license_expiration_date > '2024-01-01T00:00:00'"
+    page_size: 5000
+    columns:
+      name: business_name
+      phone: phone_number
+      line1: mailing_address_line1
+      city: mailing_address_city
+      region: mailing_address_state
+      postal_code: mailing_address_zip_code
+      license_number: license_number
+      license_status: license_subtype
+      categories: license_type
+      owner_name: owner_name
+    keyword_filter_by_tag:
+      state_electrical_license: "electric"
+      state_contractor_license: "air condition|refrigeration|hvac|plumb"
+      state_cosmetology_license: "cosmetology|salon|beauty|esthetic"
+
+  - key: tx_sprs_pest
+    name: Texas Dept. of Agriculture - structural pest control business licences
+    type: csv
+    states: [TX]
+    tags: [state_pest_control_license]
+    url: https://www.texasagriculture.gov/Portals/0/forms/ADM/SPCS_Business_Licenses.csv
+    columns:
+      name: Business_Name
+      phone: Phone
+      line1: Address
+      city: City
+      region: State
+      postal_code: Zip
+      license_number: License_Number
+      license_status: Status
+
+  - key: fl_dbpr_construction
+    name: Florida DBPR - construction industry licensing board extract
+    type: csv
+    states: [FL]
+    tags: [state_contractor_license, state_electrical_license]
+    url: https://www2.myfloridalicense.com/sto/file_download/extracts/cilb_cert.csv
+    columns:
+      name: DBA Name
+      phone: Phone
+      line1: Address Line 1
+      city: City
+      region: State
+      postal_code: Zip
+      license_number: License Number
+      license_status: Status
+      categories: Board/Profession
+      owner_name: Licensee Name
+    keyword_filter_by_tag:
+      state_contractor_license: "plumbing|mechanical|air|roof|building|residential"
+      state_electrical_license: "electric"
+
+  - key: ca_cslb
+    name: California CSLB - licensed contractors (classification filter)
+    type: csv
+    states: [CA]
+    tags: [state_contractor_license, state_electrical_license]
+    url: https://www.cslb.ca.gov/Resources/DataPortal/CSLB_Licenses.csv
+    columns:
+      name: BusinessName
+      phone: BusinessPhone
+      line1: MailingAddress
+      city: City
+      region: State
+      postal_code: ZIPCode
+      license_number: LicenseNo
+      license_status: PrimaryStatus
+      categories: Classifications
+    keyword_filter_by_tag:
+      state_contractor_license: "C-36|C-20|C-39|B\\b"
+      state_electrical_license: "C-10"
+
+  - key: nyc_dca_licenses
+    name: NYC DCWP - business licences (home improvement contractors)
+    type: socrata
+    states: [NY]
+    tags: [state_contractor_license]
+    url: https://data.cityofnewyork.us/resource/w7w3-xahh.json
+    filters: "license_status = 'Active' AND industry like '%Home Improvement%'"
+    page_size: 5000
+    columns:
+      name: business_name
+      phone: contact_phone
+      line1: address_building
+      city: address_city
+      region: address_state
+      postal_code: address_zip
+      license_number: license_nbr
+      license_status: license_status
+      categories: industry
