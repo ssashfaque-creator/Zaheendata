@@ -3,7 +3,7 @@ from pathlib import Path
 import duckdb
 
 from zaheendata.models import empty_lead
-from zaheendata.pipeline.build import persist_leads
+from zaheendata.pipeline.build import LEAD_COLUMNS, LEAD_INSERT_SQL, _lead_values, persist_leads
 from zaheendata.pipeline.filter import keep_for_enrichment
 from zaheendata.pipeline.ingest import attach_warehouse_overlays, ingest_license_json, ingest_overture_parquet, places_to_leads
 from zaheendata.pipeline.score import score_lead
@@ -54,6 +54,11 @@ def _write_places_parquet(path: Path) -> None:
         """
     )
     con.close()
+
+
+def test_lead_insert_placeholders_match_columns() -> None:
+    assert LEAD_INSERT_SQL.count("?") == len(LEAD_COLUMNS) == 61
+    assert len(_lead_values(empty_lead(name="Cool Air"))) == len(LEAD_COLUMNS)
 
 
 def test_ingest_filters_directories_and_overlays(tmp_path: Path) -> None:

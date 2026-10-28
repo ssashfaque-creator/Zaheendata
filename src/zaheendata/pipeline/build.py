@@ -13,20 +13,76 @@ from zaheendata.pipeline.score import rank_leads, score_lead
 from zaheendata.subsectors import get_subsector
 from zaheendata.warehouse import connect, warehouse_stats
 
-LEAD_INSERT_SQL = """
-INSERT OR REPLACE INTO leads
-(business_id, name, phone, website, website_crawled, address, city, state, postal_code,
- owner_name, owner_email, owner_phone, employee_count, naics, score_total, rank, status,
- sources, lat, lng, domain, google_place_id, categories, owner_title, owner_linkedin,
- owner_source, owner_confidence, email_is_role_account, suppressed, suppression_reasons,
- rejection_reason, license_number, license_status, online_booking, booking_provider,
- quote_form, says_call_for_quote, emergency_service, maintenance_plan, recurring_service,
- free_estimate, online_store, store_platform, sells_gift_cards, hosts_events, instagram,
- tech_stack, tool_categories, pain_mentions, pain_examples, google_rating, google_reviews,
- recent_reviews_90d, last_review_at, busy_and_growing, admin_pain, multi_tool,
- owner_reachable, subsector_signal, score_evidence, subsector)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-"""
+LEAD_COLUMNS = (
+    "business_id",
+    "name",
+    "phone",
+    "website",
+    "website_crawled",
+    "address",
+    "city",
+    "state",
+    "postal_code",
+    "owner_name",
+    "owner_email",
+    "owner_phone",
+    "employee_count",
+    "naics",
+    "score_total",
+    "rank",
+    "status",
+    "sources",
+    "lat",
+    "lng",
+    "domain",
+    "google_place_id",
+    "categories",
+    "owner_title",
+    "owner_linkedin",
+    "owner_source",
+    "owner_confidence",
+    "email_is_role_account",
+    "suppressed",
+    "suppression_reasons",
+    "rejection_reason",
+    "license_number",
+    "license_status",
+    "online_booking",
+    "booking_provider",
+    "quote_form",
+    "says_call_for_quote",
+    "emergency_service",
+    "maintenance_plan",
+    "recurring_service",
+    "free_estimate",
+    "online_store",
+    "store_platform",
+    "sells_gift_cards",
+    "hosts_events",
+    "instagram",
+    "tech_stack",
+    "tool_categories",
+    "pain_mentions",
+    "pain_examples",
+    "google_rating",
+    "google_reviews",
+    "recent_reviews_90d",
+    "last_review_at",
+    "busy_and_growing",
+    "admin_pain",
+    "multi_tool",
+    "owner_reachable",
+    "subsector_signal",
+    "score_evidence",
+    "subsector",
+)
+LEAD_INSERT_SQL = (
+    "INSERT OR REPLACE INTO leads ("
+    + ", ".join(LEAD_COLUMNS)
+    + ") VALUES ("
+    + ", ".join("?" for _ in LEAD_COLUMNS)
+    + ")"
+)
 
 
 def _lead_values(lead: Lead) -> list:
@@ -99,8 +155,13 @@ def _lead_values(lead: Lead) -> list:
 def persist_leads(leads: list[Lead], warehouse: Path | None = None) -> None:
     if not leads:
         return
+    rows = [_lead_values(lead) for lead in leads]
+    if any(len(row) != len(LEAD_COLUMNS) for row in rows):
+        raise ValueError(
+            f"lead row width {len(rows[0])} does not match {len(LEAD_COLUMNS)} warehouse columns"
+        )
     con = connect(warehouse)
-    con.executemany(LEAD_INSERT_SQL, [_lead_values(lead) for lead in leads])
+    con.executemany(LEAD_INSERT_SQL, rows)
     con.close()
 
 
