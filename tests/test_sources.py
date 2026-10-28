@@ -22,7 +22,10 @@ def test_sources_disabled_without_keys():
     assert described["google_places"]["available"] is False
     assert "ZAHEEN_GOOGLE_MAPS_API_KEY" in described["google_places"]["reason"]
     assert described["google_maps_scraper"]["available"] is False
-    assert described["apollo"]["available"] is False
+    assert described["sam_gov"]["available"] is False
+    assert "ZAHEEN_SAM_GOV_API_KEY" in described["sam_gov"]["reason"]
+    assert described["sba_ppp"]["available"] is False
+    assert described["public_datasets"]["available"] is True
 
 
 def test_build_sources_picks_subsector_cross_checks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -34,7 +37,7 @@ def test_build_sources_picks_subsector_cross_checks(monkeypatch: pytest.MonkeyPa
         http=HttpClient(settings, cache=ResponseCache(tmp_path / "c.sqlite", 10)), settings=settings
     )
     names = {s.name for s in build_sources(ctx, get_registry().get("plumbing_hvac"))}
-    assert {"google_places", "yelp", "state_license"} <= names
+    assert {"google_places", "yelp", "public_datasets"} <= names
     names_gift = {s.name for s in build_sources(ctx, get_registry().get("gift_souvenir_stores"))}
     assert "yelp" not in names_gift and "google_places" in names_gift
     only = {s.name for s in build_sources(ctx, get_registry().get("plumbing_hvac"), only=["yelp"])}
@@ -132,7 +135,7 @@ async def test_http_client_retries_on_429(tmp_path: Path):
     await http.aclose()
 
 
-def test_csv_auto_mapping_data_axle_style():
+def test_csv_auto_mapping_registry_extract_style():
     headers = [
         "Company Name",
         "Address",
@@ -172,14 +175,14 @@ def test_csv_auto_mapping_data_axle_style():
             strict=True,
         )
     )
-    rec = row_to_record(row, mapping, "import:data_axle", None, SourceKind.VENDOR)
+    rec = row_to_record(row, mapping, "import:sos_extract", None, SourceKind.IMPORT)
     assert rec.name == "Acme Plumbing LLC" and rec.employee_count == 12 and rec.naics == "238220"
     assert rec.owner_name == "Jane Doe" and rec.owner_email == "jane@acme.com"
     assert rec.attributes["franchise_flag"] == "N"
 
 
 async def test_csv_import_source(tmp_path: Path):
-    csv_path = tmp_path / "zoominfo.csv"
+    csv_path = tmp_path / "chamber_members.csv"
     csv_path.write_text(
         "Company Name,Website,Phone,City,State,Employees\nFoo Pest,foo.com,512-555-0001,Austin,TX,9\n,,,,,\n"
     )
@@ -187,7 +190,7 @@ async def test_csv_import_source(tmp_path: Path):
     ctx = SourceContext(
         http=HttpClient(settings, cache=ResponseCache(tmp_path / "c.sqlite", 10)), settings=settings
     )
-    src = CsvImportSource(ctx, csv_path, source_label="import:zoominfo")
+    src = CsvImportSource(ctx, csv_path, source_label="import:chamber_members")
     spec = SourceSearchSpec(subsector_key="pest_control", naics="561710", queries=[])
     recs = [r async for r in src.search(spec)]
     assert len(recs) == 1 and recs[0].naics == "561710" and recs[0].employee_count == 9

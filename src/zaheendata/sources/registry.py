@@ -4,14 +4,14 @@ from typing import Any
 
 from ..registry import SubSector
 from ..settings import Settings
-from .apollo import ApolloSource
 from .base import Source, SourceContext
-from .data_axle import DataAxleSource
 from .directory import DirectorySource
 from .google_maps_scraper import GoogleMapsScraperSource
 from .google_places import GooglePlacesSource
-from .license import StateLicenseSource
 from .overpass import OverpassSource
+from .ppp_loans import PppLoansSource
+from .public_datasets import PublicDatasetSource
+from .sam_gov import SamGovSource
 from .yelp import YelpSource
 
 SOURCE_CLASSES: dict[str, type[Source]] = {
@@ -21,9 +21,9 @@ SOURCE_CLASSES: dict[str, type[Source]] = {
         GoogleMapsScraperSource,
         YelpSource,
         OverpassSource,
-        ApolloSource,
-        DataAxleSource,
-        StateLicenseSource,
+        SamGovSource,
+        PppLoansSource,
+        PublicDatasetSource,
         DirectorySource,
     )
 }

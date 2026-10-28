@@ -3,7 +3,7 @@
   busy_and_growing   50+ Google reviews, with recent ones
   admin_pain         reviews mention slow callbacks / billing problems; site says "call for a
                      quote" with no online booking or form
-  multi_tool         BuiltWith/Wappalyzer-style detection shows a mix of separate tools
+  multi_tool         Wappalyzer-style fingerprinting shows a mix of separate tools
   owner_reachable    owner named on the site, LinkedIn or Google profile (+ direct contact)
   subsector_signal   the extra signal for that sub-sector (rules in config/subsectors.yaml)
 

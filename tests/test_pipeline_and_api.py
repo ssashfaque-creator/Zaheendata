@@ -164,6 +164,148 @@ async def test_vendor_only_campaign_skips_review_rule(env, tmp_path: Path):
     assert selected[0].website_features.maintenance_plan  # website enrichment still ran
 
 
+REGISTRY_CSV = (
+    "Company Name,Address,City,State,ZIP Code,Primary NAICS Code,Location Employees,Owner\n"
+    "HILL COUNTRY PLUMBING AND AIR LLC,1200 S LAMAR BLVD,AUSTIN,TX,78704,238220,14,Marcus Reyes\n"
+    "ROTO-ROOTER PLUMBING,900 CONGRESS AVE,AUSTIN,TX,78701,238220,12,\n"
+    "LONE STAR MECHANICAL SERVICES LLC,500 CONGRESS AVE,AUSTIN,TX,78701,238220,9,\n"
+)
+
+
+async def test_registry_only_campaign_without_maps_skips_website_rule(env, tmp_path: Path):
+    """Government registries carry no websites or reviews. With no Maps key those two rules would
+    reject everything, so they are skipped and the run is flagged for the operator."""
+    from zaheendata.models import SourceKind
+    from zaheendata.sources.csv_import import CsvImportSource
+
+    settings, db, http, _ = env
+    csv_path = tmp_path / "registry.csv"
+    csv_path.write_text(REGISTRY_CSV)
+    ctx = SourceContext(http=http, settings=settings)
+    spec = CampaignSpec(
+        name="r",
+        subsector_key="plumbing_hvac",
+        geography=GeographySpec(locations=["Austin, TX"]),
+        sources=[],
+        contact_enrichment=False,
+    )
+    campaign = await db.create_campaign(spec)
+    source = CsvImportSource(ctx, csv_path, "registry:test", kind=SourceKind.REGISTRY)
+    result = await CampaignRunner(db, http, settings, extra_sources=[source]).run(campaign)
+    assert result.stats["website_filter_skipped"] is True
+    assert result.stats["review_filter_skipped"] is True
+    assert result.stats["maps_match_pending"] == 0  # no Places source: nothing to defer to
+    assert result.stats["filter_rejections"] == {"franchise/chain": 1}
+    selected = await db.list_businesses(result.id, status=BusinessStatus.SELECTED)
+    assert {b.name for b in selected} == {
+        "HILL COUNTRY PLUMBING AND AIR LLC",
+        "LONE STAR MECHANICAL SERVICES LLC",
+    }
+
+
+class _PlacesFixtureTransport(FixtureTransport):
+    """FixtureTransport plus a Places Text Search that only knows one listing, found by name."""
+
+    def __init__(self, root: Path):
+        super().__init__(root)
+        self.text_queries: list[str] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.url.host == "places.googleapis.com":
+            import json
+
+            body = json.loads(request.content)
+            self.text_queries.append(body["textQuery"])
+            places = []
+            if body["textQuery"].lower().startswith("hill country plumbing"):
+                places = [
+                    {
+                        "id": "ChIJ_hill_country",
+                        "displayName": {"text": "Hill Country Plumbing & Air"},
+                        "formattedAddress": "1200 S Lamar Blvd, Austin, TX 78704, USA",
+                        "addressComponents": [
+                            {"types": ["locality"], "shortText": "Austin"},
+                            {"types": ["administrative_area_level_1"], "shortText": "TX"},
+                            {"types": ["postal_code"], "shortText": "78704"},
+                        ],
+                        "location": {"latitude": 30.253, "longitude": -97.763},
+                        "nationalPhoneNumber": "(512) 555-0101",
+                        "websiteUri": "https://www.hillcountryplumbingair.com",
+                        "rating": 4.8,
+                        "userRatingCount": 212,
+                        "businessStatus": "OPERATIONAL",
+                        "types": ["plumber"],
+                    },
+                    {  # a different company that happens to come back for the same query
+                        "id": "ChIJ_other",
+                        "displayName": {"text": "Hill Country Bakery"},
+                        "addressComponents": [{"types": ["administrative_area_level_1"], "shortText": "TX"}],
+                        "websiteUri": "https://hcbakery.com",
+                        "userRatingCount": 900,
+                    },
+                ]
+            return httpx.Response(200, json={"places": places})
+        if request.url.host == "maps.googleapis.com" and request.url.path.endswith("/details/json"):
+            return httpx.Response(
+                200, json={"result": {"rating": 4.8, "user_ratings_total": 212, "reviews": []}}
+            )
+        return await super().handle_async_request(request)
+
+
+async def test_registry_records_are_matched_to_google_maps(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fixtures_dir: Path
+):
+    """Registry rows have no website/reviews; with a Maps key they are matched to their listing in the
+    enrich stage, after which the website and review rules apply normally."""
+    from zaheendata.models import SourceKind
+    from zaheendata.sources.csv_import import CsvImportSource
+
+    monkeypatch.setenv("ZAHEEN_GOOGLE_MAPS_API_KEY", "k")
+    get_settings.cache_clear()
+    settings = get_settings()
+    db = Database(settings)
+    await db.init()
+    transport = _PlacesFixtureTransport(fixtures_dir)
+    http = HttpClient(settings, cache=ResponseCache(tmp_path / "cache.sqlite", 60), transport=transport)
+    csv_path = tmp_path / "registry.csv"
+    csv_path.write_text(REGISTRY_CSV)
+    ctx = SourceContext(http=http, settings=settings)
+    spec = CampaignSpec(
+        name="m",
+        subsector_key="plumbing_hvac",
+        geography=GeographySpec(locations=["Austin, TX"]),
+        sources=["google_places"],
+        contact_enrichment=False,
+    )
+    campaign = await db.create_campaign(spec)
+    source = CsvImportSource(ctx, csv_path, "registry:test", kind=SourceKind.REGISTRY)
+    result = await CampaignRunner(db, http, settings, extra_sources=[source]).run(campaign)
+    await http.aclose()
+
+    assert result.state == CampaignState.COMPLETED
+    assert result.stats["maps_match_pending"] == 3  # every registry row waited for Maps before rules
+    assert result.stats["filter_rejections"] == {"franchise/chain": 1}
+    assert result.stats["maps_matched"] == 1
+    assert "website_filter_skipped" not in result.stats
+    # one lookup per deferred business, named after the registry record
+    lookups = sorted(q.upper() for q in transport.text_queries if " IN " not in q.upper())
+    assert lookups == [
+        "HILL COUNTRY PLUMBING AND AIR LLC AUSTIN, TX",
+        "LONE STAR MECHANICAL SERVICES LLC AUSTIN, TX",
+    ]
+    selected = await db.list_businesses(result.id, status=BusinessStatus.SELECTED)
+    assert [b.name for b in selected] == ["Hill Country Plumbing & Air"]  # Maps display name wins
+    hill = selected[0]
+    assert hill.google_place_id == "ChIJ_hill_country" and hill.review_count == 212
+    assert hill.domain == "hillcountryplumbingair.com" and hill.employee_count == 14
+    assert hill.owner.name == "Marcus Reyes"
+    assert {p.source for p in hill.provenance} == {"registry:test", "google_places"}
+    rejected = await db.list_businesses(result.id, status=BusinessStatus.REJECTED)
+    lone = next(b for b in rejected if b.name.startswith("LONE STAR"))
+    assert lone.rejection_reason == "no website" and lone.attributes["maps_match"] == "none"
+    await db.close()
+
+
 async def test_beauty_salon_campaign_uses_subsector_rule(env):
     db, result, _ = await _run(env, subsector="beauty_salons")
     selected = await db.list_businesses(result.id, status=BusinessStatus.SELECTED)

@@ -16,6 +16,7 @@ def _isolated_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("ZAHEEN_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("ZAHEEN_HTTP_CACHE_PATH", str(tmp_path / "data" / "cache.sqlite"))
+    monkeypatch.setenv("ZAHEEN_PPP_DATA_DIR", str(tmp_path / "data" / "ppp"))
     monkeypatch.setenv("ZAHEEN_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'data' / 'test.db'}")
     monkeypatch.setenv("ZAHEEN_ENABLE_OVERPASS", "false")
     monkeypatch.setenv("ZAHEEN_PER_HOST_REQUESTS_PER_SECOND", "1000")

@@ -22,7 +22,15 @@ class FixtureTransport(httpx.AsyncBaseTransport):
         host = request.url.host
         path = request.url.path
         if "nominatim" in host:
-            body = json.dumps([{"lat": str(self.geocode[0]), "lon": str(self.geocode[1])}])
+            body = json.dumps(
+                [
+                    {
+                        "lat": str(self.geocode[0]),
+                        "lon": str(self.geocode[1]),
+                        "address": {"county": "Travis County"},
+                    }
+                ]
+            )
             return httpx.Response(200, content=body.encode(), headers={"content-type": "application/json"})
         if "maps.googleapis.com" in host and path.endswith("/geocode/json"):
             body = json.dumps(

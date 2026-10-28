@@ -43,14 +43,24 @@ class Settings(BaseSettings):
     website_max_bytes: int = 2_000_000
 
     # --- API keys (all optional; a source is disabled when its key is missing) --
+    # No paid list vendors: long lists come from government registries (SAM.gov, SBA PPP,
+    # state tax-permit / licence rolls on Socrata), Google Maps and public directories.
     google_maps_api_key: SecretStr | None = None
     yelp_api_key: SecretStr | None = None
-    apollo_api_key: SecretStr | None = None
-    data_axle_api_key: SecretStr | None = None
-    zoominfo_api_key: SecretStr | None = None
-    builtwith_api_key: SecretStr | None = None
-    hunter_api_key: SecretStr | None = None
+    sam_gov_api_key: SecretStr | None = Field(
+        default=None, description="Free key from api.data.gov; unlocks SAM.gov entity search."
+    )
+    census_api_key: SecretStr | None = Field(
+        default=None, description="Free key from api.census.gov; required for `zaheen plan` (CBP counts)."
+    )
     openai_api_key: SecretStr | None = None
+
+    # --- bulk public datasets -----------------------------------------------
+    ppp_data_dir: Path = Field(
+        default=PROJECT_ROOT / "data" / "ppp",
+        description="Folder holding SBA PPP FOIA CSVs (public_150k_plus_*.csv, public_up_to_150k_*.csv).",
+    )
+    public_dataset_refresh_days: int = 7
 
     # --- source feature flags ---------------------------------------------
     enable_google_maps_scraper: bool = False  # Playwright based; see docs/DATA_SOURCES.md for ToS notes

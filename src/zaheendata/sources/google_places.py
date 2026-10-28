@@ -11,8 +11,11 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any, ClassVar
 
+from rapidfuzz import fuzz
+
 from ..logging import get_logger
 from ..models import Address, GeoPoint, RawRecord, Review, SourceKind, SourceSearchSpec
+from ..normalize import normalize_name
 from ..settings import Settings
 from .base import Source
 
@@ -20,6 +23,7 @@ log = get_logger(__name__)
 
 SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
+MATCH_THRESHOLD = 82  # token_set_ratio needed to accept a Maps listing for a registry record
 
 SEARCH_FIELD_MASK = (
     ",".join(
@@ -141,6 +145,37 @@ class GooglePlacesSource(Source):
                 page_token = data.get("nextPageToken")
                 if not page_token or yielded >= spec.limit:
                     break
+
+    async def match_business(
+        self, name: str, city: str | None, region: str | None, postal_code: str | None = None
+    ) -> RawRecord | None:
+        """Find the Google Maps listing for a registry / licence record (name + city + state).
+
+        One Text Search call per lookup. Accepts a candidate only when the name is a close fuzzy match
+        and the state agrees, so a registry's legal name does not get attached to a stranger's listing."""
+        where = ", ".join(filter(None, [city, region])) or (postal_code or "")
+        text = f"{name} {where}".strip()
+        body: dict[str, Any] = {"textQuery": text, "pageSize": 5, "languageCode": "en"}
+        data = await self.http.post_json(
+            SEARCH_URL,
+            json_body=body,
+            headers=self._headers(SEARCH_FIELD_MASK),
+            meter="google_places.text_search",
+        )
+        target = normalize_name(name)
+        best: tuple[float, RawRecord] | None = None
+        for place in data.get("places", []):
+            rec = parse_place(place)
+            if not rec.name:
+                continue
+            if region and rec.address and rec.address.region and rec.address.region.upper() != region.upper():
+                continue
+            score = float(fuzz.token_set_ratio(target, normalize_name(rec.name)))
+            if postal_code and rec.address and rec.address.postal_code == postal_code[:5]:
+                score += 5
+            if score >= MATCH_THRESHOLD and (best is None or score > best[0]):
+                best = (score, rec)
+        return best[1] if best else None
 
     async def fetch_reviews(self, place_id: str, max_reviews: int = 5) -> tuple[list[Review], dict[str, Any]]:
         data = await self.http.get_json(

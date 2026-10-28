@@ -72,10 +72,14 @@ class FranchiseDetector:
         ):
             return f"franchise domain: {b.domain}"
         flag = b.attributes.get("franchise_flag") or b.attributes.get("chain_flag")
-        if isinstance(flag, str) and flag.strip().lower() in {"y", "yes", "true", "1", "franchise"}:
-            return "vendor franchise flag"
+        if isinstance(flag, str):
+            value = flag.strip().lower()
+            if value in {"y", "yes", "true", "1", "franchise"}:
+                return "record franchise flag"
+            if value and value not in {"n", "no", "false", "0", "none", "null", "n/a", "na"}:
+                return f"franchise on record: {flag.strip()}"  # e.g. SBA PPP FranchiseName
         if flag is True:
-            return "vendor franchise flag"
+            return "record franchise flag"
         if b.attributes.get("brand_wikidata"):
             return f"OSM brand tag: {b.attributes.get('brand')}"
         threshold = self.config.min_locations_for_chain
@@ -103,12 +107,23 @@ class PoorFitFilter:
         self.franchise = franchise or FranchiseDetector()
 
     def apply(
-        self, businesses: list[Business], require_website: bool = True, require_reviews: bool = True
+        self,
+        businesses: list[Business],
+        require_website: bool = True,
+        require_reviews: bool = True,
+        deferred: set[str] | None = None,
     ) -> dict[str, int]:
+        """``deferred`` holds ids of businesses whose website / review rules are postponed (they
+        came from a registry and will be matched to Google Maps during enrichment)."""
         self.franchise.fit(businesses)
         reasons: Counter[str] = Counter()
         for b in businesses:
-            reason = self.reject_reason(b, require_website=require_website, require_reviews=require_reviews)
+            later = bool(deferred and b.id in deferred)
+            reason = self.reject_reason(
+                b,
+                require_website=require_website and not later,
+                require_reviews=require_reviews and not later,
+            )
             if reason:
                 b.status = BusinessStatus.REJECTED
                 b.rejection_reason = reason

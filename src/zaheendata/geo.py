@@ -105,6 +105,7 @@ class SearchCell:
     radius_km: float
     label: str
     region: str | None
+    county: str | None = None  # "Travis" - lets county-keyed registries narrow a metro search
 
 
 def grid_cells(
@@ -115,6 +116,7 @@ def grid_cells(
     cell_km: float,
     label: str,
     region: str | None,
+    county: str | None = None,
 ) -> list[SearchCell]:
     cells: list[SearchCell] = []
     lat_step = cell_km / 111.0
@@ -125,14 +127,23 @@ def grid_cells(
         lng = min_lng + lng_step / 2
         while lng < max_lng:
             cells.append(
-                SearchCell(GeoPoint(lat=round(lat, 4), lng=round(lng, 4)), round(radius, 2), label, region)
+                SearchCell(
+                    GeoPoint(lat=round(lat, 4), lng=round(lng, 4)), round(radius, 2), label, region, county
+                )
             )
             lng += lng_step
         lat += lat_step
     if not cells:  # area smaller than one cell (RI, DE, DC ...): search from its centroid
         center = GeoPoint(lat=round((min_lat + max_lat) / 2, 4), lng=round((min_lng + max_lng) / 2, 4))
-        cells.append(SearchCell(center, round(radius, 2), label, region))
+        cells.append(SearchCell(center, round(radius, 2), label, region, county))
     return cells
+
+
+def normalize_county(name: str | None) -> str | None:
+    if not name:
+        return None
+    cleaned = re.sub(r"\s+(County|Parish|Borough|Census Area|Municipality)$", "", name.strip(), flags=re.I)
+    return cleaned or None
 
 
 class Geocoder:
@@ -143,6 +154,11 @@ class Geocoder:
         self.settings = get_settings()
 
     async def geocode(self, text: str) -> GeoPoint | None:
+        found = await self.geocode_detailed(text)
+        return found[0] if found else None
+
+    async def geocode_detailed(self, text: str) -> tuple[GeoPoint, str | None] | None:
+        """Return (point, county) where county is normalised like "Travis" (no "County" suffix)."""
         key = self.settings.secret("google_maps_api_key")
         if key:
             data = await self.http.get_json(
@@ -151,17 +167,26 @@ class Geocoder:
                 meter="google_places.geocode",
             )
             results = data.get("results") or []
-            if results:
-                loc = results[0]["geometry"]["location"]
-                return GeoPoint(lat=loc["lat"], lng=loc["lng"])
-            return None
+            if not results:
+                return None
+            loc = results[0]["geometry"]["location"]
+            county = next(
+                (
+                    c.get("long_name")
+                    for c in results[0].get("address_components", [])
+                    if "administrative_area_level_2" in c.get("types", [])
+                ),
+                None,
+            )
+            return GeoPoint(lat=loc["lat"], lng=loc["lng"]), normalize_county(county)
         data = await self.http.get_json(
             f"{self.settings.nominatim_url}/search",
-            params={"q": text, "format": "json", "limit": 1, "countrycodes": "us"},
+            params={"q": text, "format": "json", "limit": 1, "countrycodes": "us", "addressdetails": 1},
         )
-        if data:
-            return GeoPoint(lat=float(data[0]["lat"]), lng=float(data[0]["lon"]))
-        return None
+        if not data:
+            return None
+        county = (data[0].get("address") or {}).get("county")
+        return GeoPoint(lat=float(data[0]["lat"]), lng=float(data[0]["lon"])), normalize_county(county)
 
 
 class GeoPlanner:
@@ -173,13 +198,14 @@ class GeoPlanner:
             cells: list[SearchCell] = []
             for loc in spec.locations:
                 city, state = parse_location_text(loc)
-                point = await self.geocoder.geocode(loc) if self.geocoder else None
-                if point is None:
+                found = await self.geocoder.geocode_detailed(loc) if self.geocoder else None
+                if found is None:
                     log.warning("geo.unresolved_location", location=loc)
                     cells.append(SearchCell(GeoPoint(lat=0, lng=0), spec.radius_km, loc, state))
                     continue
+                point, county = found
                 if spec.radius_km <= spec.grid_cell_km:
-                    cells.append(SearchCell(point, spec.radius_km, loc, state))
+                    cells.append(SearchCell(point, spec.radius_km, loc, state, county))
                 else:
                     d = spec.radius_km / 111.0
                     cells.extend(
@@ -191,6 +217,7 @@ class GeoPlanner:
                             spec.grid_cell_km,
                             loc,
                             state,
+                            county,
                         )
                     )
             return cells

@@ -1,13 +1,15 @@
 # Sub-sector registry. One entry per target sub-sector from the brief.
 #
-#   naics              NAICS code used for vendor filters (Data Axle, D&B, ZoomInfo, Apollo).
+#   naics              NAICS code used to filter government registries (SAM.gov, SBA PPP, state
+#                      tax-permit / business-registration rolls, Census CBP).
 #   scope              Default geographic scope needed to reach ~100 good fits
 #                      (metro | state | national). Small sub-sectors need a wider area.
-#   cross_check        Sub-sector specific sources used to catch businesses vendors miss.
+#   cross_check        Sub-sector specific sources used to catch businesses registries miss.
 #   queries            Keyword queries for maps-style sources (Google Places, Yelp, OSM).
 #   yelp_categories    Yelp Fusion category aliases.
 #   osm_tags           OpenStreetMap tag filters for Overpass.
-#   apollo_keywords    Industry keyword hints for Apollo / vendor search.
+#   keywords           Industry keywords used to narrow registries that carry a free-text
+#                      industry / licence-type column instead of NAICS.
 #   fit_signal         The sub-sector specific "best-fit" signal, expressed as feature rules.
 #                      points = 2 when matched >= strong_threshold, 1 when >= 1, else 0.
 #                      Any matched negative feature with no positive match forces 0.
@@ -24,7 +26,7 @@ subsectors:
     queries: ["plumber", "plumbing contractor", "HVAC contractor", "heating and air conditioning", "furnace repair"]
     yelp_categories: [plumbing, hvac, waterheaterinstallrepair]
     osm_tags: ["craft=plumber", "craft=hvac", "shop=hvac"]
-    apollo_keywords: ["plumbing", "hvac", "heating and air conditioning"]
+    keywords: ["plumbing", "hvac", "heating and air conditioning"]
     fit_signal:
       description: Offers emergency service and maintenance plans
       features: [emergency_service, maintenance_plan]
@@ -38,7 +40,7 @@ subsectors:
     queries: ["electrician", "electrical contractor", "residential electrician"]
     yelp_categories: [electricians]
     osm_tags: ["craft=electrician"]
-    apollo_keywords: ["electrical contractor", "electrician"]
+    keywords: ["electrical contractor", "electrician"]
     fit_signal:
       description: Residential service work rather than commercial bids
       features: [residential_focus, emergency_service]
@@ -53,7 +55,7 @@ subsectors:
     queries: ["landscaping company", "lawn care service", "landscape maintenance"]
     yelp_categories: [landscaping, lawnservices]
     osm_tags: ["craft=gardener", "shop=garden_centre", "office=landscaping"]
-    apollo_keywords: ["landscaping", "lawn care"]
+    keywords: ["landscaping", "lawn care"]
     fit_signal:
       description: Recurring maintenance contracts and several crews
       features: [recurring_service, multiple_crews_or_staff]
@@ -67,7 +69,7 @@ subsectors:
     queries: ["home remodeling contractor", "kitchen remodeler", "bathroom remodeling", "general contractor residential"]
     yelp_categories: [contractors, homeremodeling]
     osm_tags: ["craft=builder", "office=construction_company"]
-    apollo_keywords: ["remodeling", "home improvement contractor"]
+    keywords: ["remodeling", "home improvement contractor"]
     fit_signal:
       description: Many estimates per month; project gallery online
       features: [project_gallery, free_estimate, has_quote_form]
@@ -81,7 +83,7 @@ subsectors:
     queries: ["roofing contractor", "roofer", "roof repair"]
     yelp_categories: [roofing]
     osm_tags: ["craft=roofer"]
-    apollo_keywords: ["roofing"]
+    keywords: ["roofing"]
     fit_signal:
       description: Inspection request form; insurance and storm work
       features: [inspection_request, insurance_storm_work]
@@ -95,7 +97,7 @@ subsectors:
     queries: ["pest control", "exterminator", "termite control"]
     yelp_categories: [pest_control]
     osm_tags: ["shop=pest_control", "craft=pest_control"]
-    apollo_keywords: ["pest control", "exterminator"]
+    keywords: ["pest control", "exterminator"]
     fit_signal:
       description: Quarterly service plans with recurring billing
       features: [recurring_service, maintenance_plan]
@@ -109,7 +111,7 @@ subsectors:
     queries: ["painting contractor", "house painter", "residential painting"]
     yelp_categories: [painters]
     osm_tags: ["craft=painter"]
-    apollo_keywords: ["painting contractor"]
+    keywords: ["painting contractor"]
     fit_signal:
       description: Residential work with "free estimate" offers
       features: [residential_focus, free_estimate]
@@ -123,7 +125,7 @@ subsectors:
     queries: ["pool service", "pool cleaning", "gutter cleaning", "chimney sweep", "pressure washing"]
     yelp_categories: [poolcleaners, gutterservices, chimneysweeps, pressurewashers]
     osm_tags: ["craft=chimney_sweeper", "shop=swimming_pool"]
-    apollo_keywords: ["pool service", "gutter cleaning", "pressure washing", "chimney"]
+    keywords: ["pool service", "gutter cleaning", "pressure washing", "chimney"]
     fit_signal:
       description: Recurring route-based service
       features: [recurring_service, maintenance_plan]
@@ -137,7 +139,7 @@ subsectors:
     queries: ["hair salon", "beauty salon"]
     yelp_categories: [hair, beautysvc]
     osm_tags: ["shop=hairdresser", "shop=beauty"]
-    apollo_keywords: ["hair salon", "beauty salon"]
+    keywords: ["hair salon", "beauty salon"]
     fit_signal:
       description: 5+ chairs, sells retail products, phone-only or basic booking
       features: [five_plus_chairs, retail_products, no_online_booking]
@@ -151,7 +153,7 @@ subsectors:
     queries: ["nail salon", "manicure pedicure"]
     yelp_categories: [othersalons, nailsalons]
     osm_tags: ["shop=beauty", "beauty=nails"]
-    apollo_keywords: ["nail salon"]
+    keywords: ["nail salon"]
     fit_signal:
       description: Walk-in heavy, sells gift cards, no online booking
       features: [walk_ins_welcome, sells_gift_cards, no_online_booking]
@@ -165,7 +167,7 @@ subsectors:
     queries: ["commercial cleaning service", "janitorial service", "office cleaning"]
     yelp_categories: [officecleaning, homecleaning]
     osm_tags: ["craft=cleaning", "office=cleaning", "shop=cleaning"]
-    apollo_keywords: ["janitorial", "commercial cleaning"]
+    keywords: ["janitorial", "commercial cleaning"]
     fit_signal:
       description: Several commercial clients and staff schedules
       features: [commercial_clients, multiple_crews_or_staff]
@@ -179,7 +181,7 @@ subsectors:
     queries: ["florist", "flower shop"]
     yelp_categories: [florists]
     osm_tags: ["shop=florist"]
-    apollo_keywords: ["florist", "flower shop"]
+    keywords: ["florist", "flower shop"]
     fit_signal:
       description: Wedding and event work; own online store, not wire orders only
       features: [wedding_event_work, online_store]
@@ -194,7 +196,7 @@ subsectors:
     queries: ["pet store", "pet supply store", "pet shop grooming"]
     yelp_categories: [petstore]
     osm_tags: ["shop=pet"]
-    apollo_keywords: ["pet store", "pet supplies"]
+    keywords: ["pet store", "pet supplies"]
     fit_signal:
       description: In-store grooming (bookings plus retail)
       features: [grooming_services, retail_products, has_online_booking]
@@ -208,7 +210,7 @@ subsectors:
     queries: ["sporting goods store", "team sports store", "team uniforms"]
     yelp_categories: [sportgoods]
     osm_tags: ["shop=sports"]
-    apollo_keywords: ["sporting goods"]
+    keywords: ["sporting goods"]
     fit_signal:
       description: Team and uniform sales needing quotes and invoices
       features: [team_uniform_sales, has_quote_form]
@@ -222,7 +224,7 @@ subsectors:
     queries: ["gift shop", "souvenir shop", "boutique gift store"]
     yelp_categories: [giftshops]
     osm_tags: ["shop=gift"]
-    apollo_keywords: ["gift shop"]
+    keywords: ["gift shop"]
     fit_signal:
       description: Sells in-store and on Shopify or Etsy
       features: [store_on_shopify_or_etsy]
@@ -236,7 +238,7 @@ subsectors:
     queries: ["women's clothing boutique", "women's boutique", "womens clothing store"]
     yelp_categories: [womenscloth]
     osm_tags: ["shop=clothes", "clothes=women"]
-    apollo_keywords: ["women's boutique", "women's clothing"]
+    keywords: ["women's boutique", "women's clothing"]
     fit_signal:
       description: Sells through Instagram or live sales as well as the shop
       features: [instagram_shop_signals, instagram_present, online_store]
@@ -250,7 +252,7 @@ subsectors:
     queries: ["game store", "hobby shop", "toy store", "comic and game store", "tabletop game store"]
     yelp_categories: [hobbyshops, toys, tabletopgames]
     osm_tags: ["shop=games", "shop=toys", "shop=hobby", "shop=model"]
-    apollo_keywords: ["hobby shop", "game store", "toy store"]
+    keywords: ["hobby shop", "game store", "toy store"]
     fit_signal:
       description: Hosts events or tournaments; has an online store
       features: [hosts_events, online_store]

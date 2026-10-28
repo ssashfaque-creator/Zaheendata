@@ -1,6 +1,7 @@
 """Campaign pipeline: the four-step method from the brief as resumable stages.
 
-    collect  -> long list of 300-500 raw observations from vendors + sub-sector cross-check sources
+    collect  -> long list of 300-500 raw observations from government registries, Maps and the
+                sub-sector cross-check sources
     resolve  -> entity resolution into unique businesses
     filter   -> remove poor fits (franchise/chain, no website, <10 reviews, outside area)
     enrich   -> reviews (newest), website crawl + features, tech stack, pain analysis; re-filter
@@ -22,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .enrich import OwnerEnricher, ReviewAnalyzer, TechStackDetector, WebsiteCrawler, extract_features
-from .enrich.techstack import BuiltWithClient
+from .enrich.owner import OwnerLookup
 from .filters import PoorFitFilter
 from .geo import AreaMatcher, Geocoder, GeoPlanner, SearchCell
 from .http import HttpClient
@@ -37,12 +38,13 @@ from .models import (
     utcnow,
 )
 from .registry import SubSector, get_registry
-from .resolve import resolve
+from .resolve import attach_record, resolve
 from .scoring import ScoringEngine, rank_and_select
 from .settings import Settings, get_settings
 from .sources import Source, SourceContext, build_sources
-from .sources.apollo import ApolloSource
 from .sources.google_places import GooglePlacesSource
+from .sources.public_datasets import PublicDatasetSource
+from .sources.sam_gov import SamGovSource
 from .storage import Database
 
 log = get_logger(__name__)
@@ -80,7 +82,6 @@ class CampaignRunner:
         self.reviews = ReviewAnalyzer(self.settings)
         self.tech = TechStackDetector()
         self.crawler = WebsiteCrawler(self.http, self.settings)
-        self.builtwith = BuiltWithClient(self.http)
 
     async def _emit(self, stage: str, **data: Any) -> None:
         log.info(f"pipeline.{stage}", **data)
@@ -160,6 +161,7 @@ class CampaignRunner:
                 if cell and cell.region and "," in cell.label
                 else (cell.label if cell else None),
                 region=cell.region if cell else None,
+                county=cell.county if cell else None,
                 employee_min=emp_min,
                 employee_max=emp_max,
                 limit=max(60, target // max(1, len(ctx.cells))),
@@ -191,8 +193,8 @@ class CampaignRunner:
 
         tasks = []
         for source in ctx.sources:
-            # Vendors / imports / licence rolls are region-level: one call per distinct region (or once).
-            if source.kind.value in ("vendor", "import", "license"):
+            # Registries / licence rolls / imports are region-level: one call per distinct region (or once).
+            if source.kind.value in ("vendor", "import", "license", "registry"):
                 regions = {c.region for c in ctx.cells} or {None}
                 for region in regions:
                     rep = next((c for c in ctx.cells if c.region == region), None)
@@ -240,8 +242,8 @@ class CampaignRunner:
         await self._emit("resolve", raw=len(records), businesses=len(businesses))
 
     def _review_filter_enabled(self, ctx: RunContext, businesses: list[Business]) -> bool:
-        """The '<10 Google reviews' rule needs review data. Without a maps source (or a vendor file
-        carrying review counts) every record would be rejected, so the rule is skipped and flagged."""
+        """The '<10 Google reviews' rule needs review data. Without a maps source (or a file carrying
+        review counts) every record would be rejected, so the rule is skipped and flagged."""
         if any(b.review_count is not None for b in businesses):
             return True
         if not ctx.stats.get("review_filter_skipped"):
@@ -249,11 +251,37 @@ class CampaignRunner:
             ctx.stats["review_filter_skipped"] = True
         return False
 
+    def _website_filter_enabled(self, ctx: RunContext, businesses: list[Business]) -> bool:
+        """Government registries rarely list websites. If no source supplied any, the 'no website' rule
+        would empty the campaign, so it is skipped and flagged (the website crawl still runs on nothing)."""
+        if any(b.website for b in businesses):
+            return True
+        if not ctx.stats.get("website_filter_skipped"):
+            log.warning("filter.website_rule_skipped", reason="no source supplied websites")
+            ctx.stats["website_filter_skipped"] = True
+        return False
+
+    @staticmethod
+    def _places(ctx: RunContext) -> GooglePlacesSource | None:
+        return next((s for s in ctx.sources if isinstance(s, GooglePlacesSource)), None)
+
+    @staticmethod
+    def _needs_maps_match(b: Business) -> bool:
+        return b.google_place_id is None and (not b.website or b.review_count is None)
+
     async def stage_filter(self, ctx: RunContext) -> None:
         businesses = await self.db.list_businesses(ctx.campaign.id)
         area = AreaMatcher(ctx.campaign.spec.geography, ctx.cells)
-        require_reviews = self._review_filter_enabled(ctx, businesses)
-        reasons = PoorFitFilter(area, self.settings).apply(businesses, require_reviews=require_reviews)
+        # Registry / licence records have no website or reviews yet; when Google Places is configured
+        # they are matched to their Maps listing during enrichment, so those two rules wait until then.
+        deferred = {b.id for b in businesses if self._needs_maps_match(b)} if self._places(ctx) else set()
+        ctx.stats["maps_match_pending"] = len(deferred)
+        rest = [b for b in businesses if b.id not in deferred]
+        require_reviews = self._review_filter_enabled(ctx, rest) if rest else False
+        require_website = self._website_filter_enabled(ctx, rest) if rest else False
+        reasons = PoorFitFilter(area, self.settings).apply(
+            businesses, require_website=require_website, require_reviews=require_reviews, deferred=deferred
+        )
         await self.db.upsert_businesses(businesses)
         remaining = sum(1 for b in businesses if b.status != BusinessStatus.REJECTED)
         ctx.stats["filter_rejections"] = reasons
@@ -265,13 +293,16 @@ class CampaignRunner:
             return
         businesses = await self.db.list_businesses(ctx.campaign.id)
         candidates = [b for b in businesses if b.status != BusinessStatus.REJECTED]
-        places = next((s for s in ctx.sources if isinstance(s, GooglePlacesSource)), None)
+        places = self._places(ctx)
         sem = asyncio.Semaphore(self.settings.global_concurrency)
         done = 0
+        matched = 0
 
         async def enrich_one(b: Business) -> None:
-            nonlocal done
+            nonlocal done, matched
             async with sem:
+                if places is not None and self._needs_maps_match(b) and await self._match_maps(b, places):
+                    matched += 1
                 await self._enrich_business(b, places)
             done += 1
             if done % 25 == 0:
@@ -279,17 +310,42 @@ class CampaignRunner:
                 await self._emit("enrich.progress", done=done, total=len(candidates))
 
         await asyncio.gather(*(enrich_one(b) for b in candidates))
-        # Second filter pass: website-derived franchise signals and refreshed review counts.
+        # Second filter pass: website-derived franchise signals, refreshed review counts and the
+        # website / review rules for registry records that have now been matched (or not) to Maps.
         area = AreaMatcher(ctx.campaign.spec.geography, ctx.cells)
         require_reviews = self._review_filter_enabled(ctx, businesses)
-        reasons = PoorFitFilter(area, self.settings).apply(businesses, require_reviews=require_reviews)
+        require_website = self._website_filter_enabled(ctx, businesses)
+        reasons = PoorFitFilter(area, self.settings).apply(
+            businesses, require_website=require_website, require_reviews=require_reviews
+        )
         await self.db.upsert_businesses(businesses)
         remaining = sum(1 for b in businesses if b.status != BusinessStatus.REJECTED)
         ctx.stats["enriched"] = len(candidates)
+        ctx.stats["maps_matched"] = matched
         ctx.stats["websites_crawled"] = sum(1 for b in candidates if b.website_features.crawled)
         ctx.stats["filter_rejections_after_enrich"] = reasons
         ctx.stats["candidates_after_enrich"] = remaining
         await self._emit("enrich", enriched=len(candidates), remaining=remaining)
+
+    async def _match_maps(self, b: Business, places: GooglePlacesSource) -> bool:
+        """Attach the Google Maps listing to a registry-sourced business (website, phone, reviews)."""
+        addr = b.address
+        try:
+            rec = await places.match_business(
+                b.name,
+                addr.city if addr else None,
+                addr.region if addr else None,
+                addr.postal_code if addr else None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("enrich.maps_match_failed", business=b.name, error=str(exc)[:200])
+            return False
+        if rec is None:
+            b.attributes["maps_match"] = "none"
+            return False
+        attach_record(b, rec)
+        b.attributes["maps_match"] = "matched"
+        return True
 
     async def _enrich_business(self, b: Business, places: GooglePlacesSource | None) -> None:
         if places is not None and b.google_place_id and not b.reviews:
@@ -309,10 +365,6 @@ class CampaignRunner:
                 b.tech_stack = self.tech.detect(pages, b.domain)
             except Exception as exc:  # noqa: BLE001
                 b.website_features.error = str(exc)[:200]
-            if self.builtwith.available and b.domain:
-                extra = await self.builtwith.lookup(b.domain)
-                known = b.tech_stack.names
-                b.tech_stack.technologies.extend(t for t in extra if t.name not in known)
         b.updated_at = utcnow()
 
     async def stage_score(self, ctx: RunContext) -> None:
@@ -338,8 +390,14 @@ class CampaignRunner:
         if not ctx.campaign.spec.contact_enrichment:
             return
         selected = await self.db.list_businesses(ctx.campaign.id, status=BusinessStatus.SELECTED)
-        apollo = next((s for s in ctx.sources if isinstance(s, ApolloSource)), None)
-        enricher = OwnerEnricher(self.http, self.settings, apollo)
+        lookups: list[tuple[str, OwnerLookup]] = []
+        sam = next((s for s in ctx.sources if isinstance(s, SamGovSource)), None)
+        if sam is not None:
+            lookups.append(("sam_gov", sam.find_owner))
+        registries = next((s for s in ctx.sources if isinstance(s, PublicDatasetSource)), None)
+        if registries is not None:
+            lookups.append(("state_registry", registries.lookup_owner))
+        enricher = OwnerEnricher(self.http, self.settings, lookups)
         sem = asyncio.Semaphore(max(2, self.settings.global_concurrency // 4))
 
         async def one(b: Business) -> None:

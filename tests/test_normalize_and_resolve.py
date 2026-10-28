@@ -71,19 +71,19 @@ def test_resolution_merges_same_business_across_sources(fixtures_dir: Path):
     records = _fixture_records(fixtures_dir / "records.json")
     clusters = cluster_records([normalize_record(r) for r in records])
     sizes = sorted(len(c) for c in clusters)
-    # Hill Country appears 3x (google, apollo, licence); Lone Star 2x (google, osm)
+    # Hill Country appears 3x (google, SBA PPP, licence); Lone Star 2x (google, osm)
     assert sizes[-2:] == [2, 3]
 
-    businesses = resolve(records, {"google_places": 80, "apollo": 70})
+    businesses = resolve(records, {"google_places": 80, "sba_ppp": 55, "license:tx_tdlr_licenses": 60})
     hill = next(b for b in businesses if "hill country" in b.normalized_name)
     assert hill.name == "Hill Country Plumbing & Air"  # consumer-facing maps name wins
     assert hill.phone_e164 == "+15125550101"
     assert hill.domain == "hillcountryplumbingair.com"
-    assert hill.employee_count == 14  # vendor field
+    assert hill.employee_count == 14  # PPP JobsReported
     assert hill.review_count == 212  # maps field
     assert hill.license_number == "TACLA0001"
     assert hill.owner.name == "Marcus Reyes"
-    assert set(hill.sources) == {"google_places", "apollo", "license:tx_tdlr_licenses"}
+    assert set(hill.sources) == {"google_places", "sba_ppp", "license:tx_tdlr_licenses"}
     assert hill.google_place_id == "ChIJ_hill_country"
 
 

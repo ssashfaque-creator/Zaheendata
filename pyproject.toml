@@ -68,6 +68,8 @@ ignore = ["B008", "SIM108", "B904"]
 # regex pattern tables read better on one line each
 "src/zaheendata/enrich/website.py" = ["E501"]
 "src/zaheendata/enrich/reviews.py" = ["E501"]
+# raw SBA PPP CSV fixture rows
+"tests/test_public_sources.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"

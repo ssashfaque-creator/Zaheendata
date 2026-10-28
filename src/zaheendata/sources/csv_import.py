@@ -1,6 +1,6 @@
-"""Import vendor exports (Data Axle, D&B Hoovers, ZoomInfo, Apollo, state license CSVs, your own
-spreadsheets). Column names are auto-mapped from a synonym table; pass an explicit mapping to
-override. Works with CSV and XLSX."""
+"""Import spreadsheets: government bulk downloads (licence rolls, Secretary of State extracts),
+chamber-of-commerce or association member lists, or your own sheets. Column names are auto-mapped
+from a synonym table; pass an explicit mapping to override. Works with CSV and XLSX."""
 
 from __future__ import annotations
 
@@ -78,8 +78,9 @@ SYNONYMS: dict[str, list[str]] = {
         "infogroup id",
         "duns",
         "duns number",
-        "zoominfo company id",
-        "apollo id",
+        "uei",
+        "entity id",
+        "loan number",
     ],
     "categories": ["category", "categories", "industry", "primary industry", "business type"],
     "franchise": ["franchise", "franchise flag", "is franchise", "franchise/specialty"],
@@ -185,8 +186,10 @@ def row_to_record(
 class CsvImportSource(Source):
     name = "csv_import"
     kind = SourceKind.IMPORT
-    tags: ClassVar[set[str]] = {"vendor", "import", "data_axle", "dnb", "zoominfo"}
-    description = "Import a vendor/licence export (CSV or XLSX) with automatic column mapping."
+    tags: ClassVar[set[str]] = {"import", "csv", "xlsx"}
+    description = (
+        "Import a CSV/XLSX file (registry extract, member list, own sheet) with automatic column mapping."
+    )
     trust = 65
 
     def __init__(

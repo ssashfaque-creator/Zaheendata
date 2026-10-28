@@ -1,4 +1,5 @@
-"""Local Wappalyzer-style technology detection plus an optional BuiltWith API lookup."""
+"""Local Wappalyzer-style technology detection from crawled HTML, script URLs, headers and
+outbound link hosts (``config/tech_fingerprints.yaml``). No paid tech-lookup API is needed."""
 
 from __future__ import annotations
 
@@ -11,12 +12,8 @@ from urllib.parse import urlsplit
 
 import yaml
 
-from ..http import HttpClient
-from ..logging import get_logger
 from ..models import Technology, TechStack
 from ..settings import get_settings
-
-log = get_logger(__name__)
 
 
 @dataclass
@@ -85,43 +82,3 @@ class TechStackDetector:
             if hit and fp.name not in found:
                 found[fp.name] = Technology(name=fp.name, category=fp.category)
         return TechStack(technologies=list(found.values()))
-
-
-class BuiltWithClient:
-    """BuiltWith Domain API (https://api.builtwith.com/v21/api.json)."""
-
-    URL = "https://api.builtwith.com/v21/api.json"
-
-    def __init__(self, http: HttpClient):
-        self.http = http
-        self.key = get_settings().secret("builtwith_api_key")
-
-    @property
-    def available(self) -> bool:
-        return bool(self.key)
-
-    async def lookup(self, domain: str) -> list[Technology]:
-        if not self.key:
-            return []
-        try:
-            data = await self.http.get_json(
-                self.URL,
-                params={"KEY": self.key, "LOOKUP": domain, "HIDETEXT": "yes"},
-                meter="builtwith.lookup",
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("builtwith.failed", domain=domain, error=str(exc))
-            return []
-        techs: list[Technology] = []
-        for result in data.get("Results", []):
-            for path in result.get("Result", {}).get("Paths", []):
-                for t in path.get("Technologies", []):
-                    cats = t.get("Categories") or ["other"]
-                    techs.append(
-                        Technology(
-                            name=t.get("Name", "?"),
-                            category=str(cats[0]).lower().replace(" ", "_"),
-                            source="builtwith",
-                        )
-                    )
-        return techs

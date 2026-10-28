@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from . import __version__
+from .census import CensusCbpClient, CensusKeyRequired, assess_scope
 from .export import to_csv, to_xlsx
 from .http import HttpClient
 from .logging import configure_logging, get_logger
@@ -80,6 +81,30 @@ async def subsectors() -> list[dict[str, Any]]:
 @app.get("/sources", dependencies=[Auth])
 async def sources() -> list[dict[str, Any]]:
     return describe_sources(get_settings())
+
+
+@app.get("/plan/{subsector_key}", dependencies=[Auth])
+async def plan(
+    subsector_key: str, state_code: str | None = Query(None, alias="state"), level: str = "county"
+) -> dict[str, Any]:
+    """Census CBP establishment counts (5-19 employees) to size the campaign geography."""
+    try:
+        sub = get_registry().get(subsector_key)
+    except KeyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    settings = get_settings()
+    try:
+        counts = await CensusCbpClient(state.http, settings).establishments(sub.naics, state_code, level)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except CensusKeyRequired as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return {
+        "subsector": sub.key,
+        "naics": sub.naics,
+        "level": level,
+        **assess_scope(counts, settings.long_list_target),
+    }
 
 
 @app.post("/campaigns", dependencies=[Auth], status_code=201)

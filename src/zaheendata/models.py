@@ -19,12 +19,13 @@ def new_id() -> str:
 
 
 class SourceKind(StrEnum):
-    VENDOR = "vendor"  # Data Axle, D&B, ZoomInfo, Apollo
+    REGISTRY = "registry"  # government registries: tax permits, business licences, SoS, SAM.gov, SBA PPP
+    LICENSE = "license"  # state contractor / cosmetology / pest-control licence boards
     MAPS = "maps"  # Google Places / Maps, Yelp, OSM
-    DIRECTORY = "directory"  # Thumbtack, Houzz, Angi, Vagaro, Faire, ISSA ...
-    LICENSE = "license"  # state contractor / cosmetology / pest-control license lists
-    IMPORT = "import"  # CSV / spreadsheet uploads
-    ENRICHMENT = "enrichment"  # website crawl, BuiltWith, Hunter, LinkedIn
+    DIRECTORY = "directory"  # trade-association directories, store locators
+    IMPORT = "import"  # CSV / spreadsheet uploads (any origin)
+    VENDOR = "vendor"  # reserved for imported commercial lists
+    ENRICHMENT = "enrichment"  # website crawl, registry officer lookups
 
 
 class GeoPoint(BaseModel):
@@ -309,6 +310,7 @@ class SourceSearchSpec(BaseModel):
     radius_km: float = 25.0
     location_text: str | None = None  # "Austin, TX"
     region: str | None = None  # state code
+    county: str | None = None  # "Travis" (metro searches only)
     country: str = "US"
     employee_min: int | None = None
     employee_max: int | None = None

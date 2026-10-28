@@ -119,11 +119,9 @@ class CostLedger:
             "google_places.details": 0.020,
             "google_places.geocode": 0.005,
             "yelp.search": 0.0,
-            "apollo.org_search": 0.0,
-            "apollo.people_match": 0.08,
-            "data_axle.search": 0.0,
-            "builtwith.lookup": 0.0,
-            "hunter.domain_search": 0.02,
+            "sam_gov.entities": 0.0,
+            "census.cbp": 0.0,
+            "socrata.query": 0.0,
         }
     )
     calls: dict[str, int] = field(default_factory=lambda: defaultdict(int))
@@ -318,6 +316,20 @@ class HttpClient:
         resp = await self.get(url, **kw)
         resp.raise_for_status()
         return resp.json()
+
+    async def download(self, url: str, path: Path, chunk_size: int = 1 << 20) -> Path:
+        """Stream a (possibly multi-GB) file to disk, bypassing the response cache."""
+        host = urlsplit(url).netloc
+        tmp = path.with_suffix(path.suffix + ".part")
+        async with self._global, self._sem(host):
+            await self._bucket(host).acquire()
+            async with self._client.stream("GET", url, timeout=None) as stream:
+                stream.raise_for_status()
+                with tmp.open("wb") as fh:
+                    async for chunk in stream.aiter_bytes(chunk_size):
+                        fh.write(chunk)
+        tmp.replace(path)
+        return path
 
     async def post_json(self, url: str, **kw: Any) -> Any:
         resp = await self.post(url, **kw)

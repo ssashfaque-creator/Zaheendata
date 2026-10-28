@@ -30,6 +30,8 @@ app = typer.Typer(
 )
 campaign_app = typer.Typer(help="Create, run and export campaigns.", no_args_is_help=True)
 app.add_typer(campaign_app, name="campaign")
+datasets_app = typer.Typer(help="Inspect and download government / public datasets.", no_args_is_help=True)
+app.add_typer(datasets_app, name="datasets")
 console = Console()
 
 
@@ -76,6 +78,175 @@ def sources() -> None:
             s["reason"] or s["description"],
         )
     console.print(table)
+
+
+@app.command()
+def plan(
+    subsector: str = typer.Argument(..., help="Sub-sector key, e.g. florists"),
+    state: str | None = typer.Option(None, help="Two-letter state; omit with --level metro"),
+    level: str = typer.Option("county", help="county | state | metro"),
+) -> None:
+    """Size the geography with Census CBP counts of 5-19 employee establishments (free key)."""
+    from .census import CensusCbpClient, CensusKeyRequired, assess_scope
+
+    sub = get_registry().get(subsector)
+    s = get_settings()
+
+    async def go() -> dict[str, Any]:
+        http = HttpClient(s)
+        try:
+            counts = await CensusCbpClient(http, s).establishments(sub.naics, state, level)
+        finally:
+            await http.aclose()
+        return assess_scope(counts, s.long_list_target)
+
+    try:
+        result = _run(go())
+    except CensusKeyRequired as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
+    table = Table(title=f"{sub.name} (NAICS {sub.naics}) - establishments by size, CBP")
+    for col in ("geography", "5-9 emp", "10-19 emp", "5-19 emp", "all"):
+        table.add_column(col, justify="right" if "emp" in col or col == "all" else "left")
+    for row in result["top"]:
+        table.add_row(
+            row["geo"],
+            str(row["estab_5_9"]),
+            str(row["estab_10_19"]),
+            str(row["estab_5_19"]),
+            str(row["estab_all"]),
+        )
+    console.print(table)
+    console.print(
+        f"total 5-19 employee establishments in scope: [bold]{result['total_estab_5_19']}[/bold]; "
+        f"recommended scope: [bold]{result['recommendation']}[/bold] - {result['note']}"
+    )
+
+
+@datasets_app.command("list")
+def datasets_list() -> None:
+    """List the configured government / public datasets (config/public_datasets.yaml)."""
+    from .sources.public_datasets import load_public_datasets
+
+    table = Table(title="Public datasets")
+    for col in ("key", "kind", "type", "states", "role", "tags"):
+        table.add_column(col)
+    for ds in load_public_datasets():
+        roles = [r for r, on in (("long_list", ds.long_list), ("owner_lookup", ds.owner_lookup)) if on]
+        if ds.tags:
+            roles.append("cross_check")
+        table.add_row(
+            ds.key, ds.kind, ds.type, ",".join(ds.states) or "-", "+".join(roles), ", ".join(ds.tags)
+        )
+    console.print(table)
+
+
+@datasets_app.command("check")
+def datasets_check(key: list[str] | None = typer.Argument(None, help="Dataset keys (default: all)")) -> None:
+    """Hit every configured dataset endpoint once to verify it is still online and the columns exist."""
+    from .sources.public_datasets import load_public_datasets, socrata_metadata_url
+
+    s = get_settings()
+    wanted = set(key or [])
+
+    async def go() -> list[tuple[str, str, str]]:
+        http = HttpClient(s)
+        out: list[tuple[str, str, str]] = []
+        try:
+            for ds in load_public_datasets():
+                if wanted and ds.key not in wanted:
+                    continue
+                try:
+                    if ds.type == "socrata":
+                        meta_url = socrata_metadata_url(ds.url)
+                        cols: set[str] = set()
+                        if meta_url:
+                            meta = await http.get_json(meta_url, use_cache=False)
+                            cols = {c["fieldName"] for c in meta.get("columns", []) if c.get("fieldName")}
+                        if not cols:  # fall back to a sample row (nulls are omitted, so only a hint)
+                            rows = await http.get_json(ds.url, params={"$limit": 1}, use_cache=False)
+                            cols = set(rows[0]) if rows else set()
+                        expected = (
+                            set(ds.columns.values())
+                            | {
+                                c
+                                for c in (ds.naics_column, ds.state_column, ds.city_column, ds.keyword_column)
+                                if c
+                            }
+                            | ({ds.dba_column} if ds.dba_column else set())
+                        )
+                        missing = sorted(c for c in expected if c not in cols) if cols else []
+                        rows = await http.get_json(
+                            ds.url,
+                            params={"$limit": 1, **({"$where": ds.filters} if ds.filters else {})},
+                            use_cache=False,
+                        )
+                        status = "ok" if not missing else "columns missing"
+                        detail = (
+                            ", ".join(missing) or f"{len(cols)} columns; filter ok ({len(rows)} sample row)"
+                        )
+                        out.append((ds.key, status, detail))
+                    else:
+                        resp = await http.get(ds.url, use_cache=False, max_bytes=4096)
+                        out.append(
+                            (
+                                ds.key,
+                                "ok" if resp.status_code < 400 else f"http {resp.status_code}",
+                                resp.headers.get("content-type", ""),
+                            )
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    out.append((ds.key, "error", str(exc)[:120]))
+        finally:
+            await http.aclose()
+        return out
+
+    table = Table(title="Dataset health")
+    for col in ("dataset", "status", "detail"):
+        table.add_column(col)
+    for k, status, detail in _run(go()):
+        colour = "green" if status == "ok" else "red"
+        table.add_row(k, f"[{colour}]{status}[/{colour}]", detail)
+    console.print(table)
+
+
+@datasets_app.command("ppp-download")
+def datasets_ppp_download(
+    dest: Path | None = typer.Option(None, help="Target folder (default ZAHEEN_PPP_DATA_DIR)"),
+    list_only: bool = typer.Option(False, "--list", help="Only list the CSV resources"),
+) -> None:
+    """Download the SBA PPP FOIA CSVs (about 11M rows, ~8 GB) from data.sba.gov."""
+    from .sources.ppp_loans import PPP_SEARCH_QUERY, PPP_SEARCH_URL, ppp_distributions
+
+    s = get_settings()
+    target = dest or s.ppp_data_dir
+
+    async def go() -> None:
+        http = HttpClient(s)
+        try:
+            data = await http.get_json(PPP_SEARCH_URL, params={"fulltext": PPP_SEARCH_QUERY}, use_cache=False)
+            resources = ppp_distributions(data)
+            if not resources:
+                raise typer.BadParameter("no public_*.csv distributions found on data.sba.gov")
+            for r in resources:
+                console.print(f"{r['title']}: {r['url']}")
+            if list_only:
+                return
+            target.mkdir(parents=True, exist_ok=True)
+            for r in resources:
+                out = target / Path(r["url"]).name
+                if out.exists():
+                    console.print(f"exists, skipping {out.name}")
+                    continue
+                console.print(f"downloading {out.name} ...")
+                await http.download(r["url"], out)
+            console.print(
+                f"done. {len(resources)} files in {target}; the first campaign run builds the state index."
+            )
+        finally:
+            await http.aclose()
+
+    _run(go())
 
 
 @app.command("db-init")
@@ -139,7 +310,7 @@ def campaign_run(
     start_stage: str = typer.Option("collect", help=f"One of {STAGES}"),
     stop_after: str | None = typer.Option(None),
     import_file: list[Path] | None = typer.Option(
-        None, "--import", help="Vendor CSV/XLSX exports to merge in"
+        None, "--import", help="CSV/XLSX files (registry extracts, member lists) to merge in"
     ),
 ) -> None:
     """Run (or resume) a campaign in this process."""

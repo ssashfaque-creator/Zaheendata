@@ -16,17 +16,18 @@
   },
   {
     "subsector_key": "plumbing_hvac",
-    "source": "apollo", "source_kind": "vendor", "source_id": "apollo-hc-1",
+    "source": "sba_ppp", "source_kind": "registry", "source_id": "ppp-0001",
     "name": "Hill Country Plumbing and Air LLC", "phone": "+1 512-555-0101", "website": "hillcountryplumbingair.com",
-    "address": {"city": "Austin", "region": "TX", "postal_code": "78704"}, "naics": "238220", "employee_count": 14,
-    "owner_name": "Marcus Reyes", "owner_title": "Owner", "linkedin_url": "https://www.linkedin.com/in/marcus-reyes-plumbing"
+    "address": {"line1": "1200 S LAMAR BLVD", "city": "AUSTIN", "region": "TX", "postal_code": "78704"}, "naics": "238220", "employee_count": 14,
+    "attributes": {"franchise_flag": null, "business_type": "Limited Liability Company(LLC)", "business_age": "Existing or more than 2 years old"}
   },
   {
     "subsector_key": "plumbing_hvac",
     "source": "license:tx_tdlr_licenses", "source_kind": "license", "source_id": "TACLA0001",
     "name": "HILL COUNTRY PLUMBING & AIR", "phone": "5125550101",
     "address": {"line1": "1200 S LAMAR BLVD", "city": "AUSTIN", "region": "TX", "postal_code": "78704"},
-    "license_number": "TACLA0001", "license_status": "Active", "categories": ["Air Conditioning and Refrigeration Contractor"]
+    "license_number": "TACLA0001", "license_status": "Active", "categories": ["Air Conditioning and Refrigeration Contractor"],
+    "owner_name": "Marcus Reyes", "owner_title": "Licence holder", "linkedin_url": "https://www.linkedin.com/in/marcus-reyes-plumbing"
   },
   {
     "subsector_key": "plumbing_hvac",

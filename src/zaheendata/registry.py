@@ -28,7 +28,7 @@ class SubSector(BaseModel):
     queries: list[str] = Field(default_factory=list)
     yelp_categories: list[str] = Field(default_factory=list)
     osm_tags: list[str] = Field(default_factory=list)
-    apollo_keywords: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
     fit_signal: FitSignalRule
 
 

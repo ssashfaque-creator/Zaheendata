@@ -18,8 +18,9 @@ from .normalize import extract_domain, normalize_name, normalize_record
 
 KIND_TRUST = {
     SourceKind.VENDOR: 70,
+    SourceKind.REGISTRY: 62,
     SourceKind.MAPS: 60,
-    SourceKind.LICENSE: 55,
+    SourceKind.LICENSE: 58,
     SourceKind.IMPORT: 65,
     SourceKind.DIRECTORY: 45,
     SourceKind.ENRICHMENT: 40,
@@ -30,6 +31,8 @@ NEAR_KM = 0.3
 
 # Fields where the "maps" view of the business is authoritative regardless of trust.
 MAPS_PREFERRED = {"name", "rating", "review_count", "reviews", "business_status", "opening_hours", "location"}
+# Fields where official / list records (registries, licence boards, imports) are authoritative.
+RECORD_KINDS = {SourceKind.VENDOR, SourceKind.REGISTRY, SourceKind.LICENSE, SourceKind.IMPORT}
 VENDOR_PREFERRED = {
     "naics",
     "employee_count",
@@ -139,14 +142,14 @@ def merge_cluster(cluster: list[RawRecord], trust_by_source: dict[str, int] | No
     ranked = sorted(cluster, key=lambda r: -_trust(r, trust_by_source))
 
     def field(name: str) -> object | None:
-        preferred_kind = None
+        preferred_kinds: set[SourceKind] = set()
         if name in MAPS_PREFERRED:
-            preferred_kind = SourceKind.MAPS
+            preferred_kinds = {SourceKind.MAPS}
         elif name in VENDOR_PREFERRED:
-            preferred_kind = SourceKind.VENDOR
+            preferred_kinds = RECORD_KINDS
         candidates = []
         for r in ranked:
-            bonus = 100 if preferred_kind and r.source_kind == preferred_kind else 0
+            bonus = 100 if r.source_kind in preferred_kinds else 0
             if name == "review_count" and r.source == "google_places":
                 bonus += 50
             candidates.append((_trust(r, trust_by_source) + bonus, getattr(r, name)))
@@ -217,6 +220,47 @@ def merge_cluster(cluster: list[RawRecord], trust_by_source: dict[str, int] | No
             if r.location:
                 business.location = GeoPoint(lat=r.location.lat, lng=r.location.lng)
                 break
+    return business
+
+
+def attach_record(business: Business, record: RawRecord) -> Business:
+    """Merge a late observation (e.g. the Google Maps listing found for a registry record) into an
+    existing Business: Maps-preferred fields are taken from the record, everything else only fills gaps."""
+    rec = normalize_record(record)
+    is_maps = rec.source_kind == SourceKind.MAPS
+    if is_maps and rec.name:
+        business.name = rec.name
+        business.normalized_name = normalize_name(rec.name)
+    if rec.website and (is_maps or not business.website):
+        business.website = rec.website
+        business.domain = extract_domain(rec.website)
+    if rec.phone and (is_maps or not business.phone_e164):
+        business.phone_e164 = rec.phone
+    if rec.address and (is_maps or business.address is None):
+        business.address = rec.address
+    if rec.location and (is_maps or business.location is None):
+        business.location = GeoPoint(lat=rec.location.lat, lng=rec.location.lng)
+    if rec.source == "google_places" and rec.source_id:
+        business.google_place_id = rec.source_id
+    for name in ("rating", "review_count", "business_status"):
+        value = getattr(rec, name)
+        if value is not None and (is_maps or getattr(business, name) is None):
+            setattr(business, name, value)
+    for c in rec.categories:
+        if c and c not in business.categories:
+            business.categories.append(c)
+    for rv in rec.reviews:
+        business.reviews.append(rv)
+    business.attributes.update({k: v for k, v in rec.attributes.items() if v not in (None, "", [], {})})
+    business.provenance.append(
+        Provenance(
+            source=rec.source,
+            source_kind=rec.source_kind,
+            source_id=rec.source_id,
+            url=rec.url,
+            fetched_at=rec.fetched_at,
+        )
+    )
     return business
 
 
