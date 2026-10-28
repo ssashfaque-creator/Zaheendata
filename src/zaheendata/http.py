@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import sqlite3
 import time
 from collections import defaultdict
@@ -33,6 +34,13 @@ from .logging import get_logger
 from .settings import Settings, get_settings
 
 log = get_logger(__name__)
+
+_SECRET_QS = re.compile(r"(?i)((?:api_key|key|token|secret)=)[^&]+")
+
+
+def redact_url(url: str) -> str:
+    """Strip API keys from URLs before they hit logs or exception messages."""
+    return _SECRET_QS.sub(r"\1REDACTED", url)
 
 
 class RetryableHTTPError(Exception):
@@ -270,6 +278,8 @@ class HttpClient:
         use_cache: bool = True,
         check_robots: bool = False,
         max_bytes: int | None = None,
+        retries: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> httpx.Response:
         host = urlsplit(url).netloc
         key = self.cache.fingerprint(method, url, params, json_body or data)
@@ -315,9 +325,15 @@ class HttpClient:
                             request=stream.request,
                         )
                 else:
-                    resp = await self._client.request(
-                        method, url, params=params, json=json_body, data=data, headers=headers
-                    )
+                    req_kw: dict[str, Any] = {
+                        "params": params,
+                        "json": json_body,
+                        "data": data,
+                        "headers": headers,
+                    }
+                    if timeout_seconds is not None:
+                        req_kw["timeout"] = timeout_seconds
+                    resp = await self._client.request(method, url, **req_kw)
             if 200 <= resp.status_code < 400:
                 self._429_streak[host] = 0
             if resp.status_code in (408, 425, 429, 500, 502, 503, 504):
@@ -333,7 +349,7 @@ class HttpClient:
 
         try:
             async for attempt in AsyncRetrying(
-                stop=stop_after_attempt(self.settings.http_max_retries),
+                stop=stop_after_attempt(retries if retries is not None else self.settings.http_max_retries),
                 wait=wait_exponential_jitter(initial=1, max=60),
                 retry=retry_if_exception_type((RetryableHTTPError, httpx.TransportError)),
                 reraise=False,
@@ -351,7 +367,7 @@ class HttpClient:
                         raise
         except RetryError as exc:
             last = exc.last_attempt.exception()
-            log.warning("http.giveup", url=url, error=str(last))
+            log.warning("http.giveup", url=redact_url(url), error=str(last) or type(last).__name__)
             raise last if last else exc
 
         if meter:
@@ -373,7 +389,12 @@ class HttpClient:
 
     async def get_json(self, url: str, **kw: Any) -> Any:
         resp = await self.get(url, **kw)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                f"HTTP {resp.status_code} for {redact_url(str(resp.request.url))}",
+                request=resp.request,
+                response=resp,
+            )
         return resp.json()
 
     async def download(self, url: str, path: Path, chunk_size: int = 1 << 20) -> Path:
@@ -392,7 +413,12 @@ class HttpClient:
 
     async def post_json(self, url: str, **kw: Any) -> Any:
         resp = await self.post(url, **kw)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                f"HTTP {resp.status_code} for {redact_url(str(resp.request.url))}",
+                request=resp.request,
+                response=resp,
+            )
         return resp.json()
 
     async def aclose(self) -> None:

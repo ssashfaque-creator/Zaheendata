@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar
 
+import httpx
 from rapidfuzz import fuzz
 
 from ..logging import get_logger
@@ -136,9 +137,20 @@ class SamGovSource(Source):
         page = 0
         seen = 0
         while True:
-            data = await self.http.get_json(
-                ENTITIES_URL, params={**params, "page": page}, meter="sam_gov.entities"
-            )
+            try:
+                data = await self.http.get_json(
+                    ENTITIES_URL, params={**params, "page": page}, meter="sam_gov.entities"
+                )
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code if exc.response is not None else 0
+                if status in {401, 403, 404}:
+                    log.warning(
+                        "sam_gov.unavailable",
+                        status=status,
+                        hint="public api.data.gov keys often cannot call Entity Management; skip SAM",
+                    )
+                    return
+                raise
             entities = data.get("entityData") or []
             for e in entities:
                 rec = parse_entity(e, spec.naics)

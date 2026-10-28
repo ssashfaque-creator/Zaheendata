@@ -405,6 +405,17 @@ async def test_sam_gov_search_pages_and_find_owner(monkeypatch: pytest.MonkeyPat
     await ctx.http.aclose()
 
 
+@respx.mock
+async def test_sam_gov_search_skips_http_404(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setenv("ZAHEEN_SAM_GOV_API_KEY", "sam-key")
+    get_settings.cache_clear()
+    respx.get(ENTITIES_URL).mock(return_value=httpx.Response(404, text="not found"))
+    ctx = _ctx(tmp_path)
+    recs = [r async for r in SamGovSource(ctx).search(_spec())]
+    await ctx.http.aclose()
+    assert recs == []
+
+
 # ---------------------------------------------------------------------------- SBA PPP
 PPP_HEADER = (
     "LoanNumber,DateApproved,BorrowerName,BorrowerAddress,BorrowerCity,BorrowerState,BorrowerZip,"

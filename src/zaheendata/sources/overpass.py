@@ -34,7 +34,7 @@ class OverpassSource(Source):
         for tag in osm_tags:
             key, _, value = tag.partition("=")
             clauses.append(f'nwr["{key}"="{value}"](around:{radius_m},{lat},{lng});')
-        return f"[out:json][timeout:90];({''.join(clauses)});out center tags 500;"
+        return f"[out:json][timeout:12];({''.join(clauses)});out center tags 500;"
 
     async def _query_with_failover(self, query: str) -> dict:
         """Public Overpass instances rate-limit and block aggressively; try mirrors in turn."""
@@ -44,10 +44,16 @@ class OverpassSource(Source):
             host = url.split("/")[2]
             self.http.set_host_rate(host, 0.2, concurrency=1)
             try:
-                return await self.http.post_json(url, data={"data": query})
+                return await self.http.post_json(
+                    url, data={"data": query}, retries=1, timeout_seconds=15.0
+                )
             except Exception as exc:  # noqa: BLE001 - try the next mirror
                 last_error = exc
-                log.warning("overpass.mirror_failed", url=url, error=str(exc)[:200])
+                log.warning(
+                    "overpass.mirror_failed",
+                    url=url,
+                    error=(str(exc) or type(exc).__name__)[:200],
+                )
         raise last_error if last_error else RuntimeError("no overpass endpoint configured")
 
     async def search(self, spec: SourceSearchSpec) -> AsyncIterator[RawRecord]:

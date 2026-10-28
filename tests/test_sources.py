@@ -7,7 +7,14 @@ import httpx
 import pytest
 import respx
 
-from zaheendata.http import HostPaused, HttpClient, ResponseCache, RetryableHTTPError, parse_retry_after
+from zaheendata.http import (
+    HostPaused,
+    HttpClient,
+    ResponseCache,
+    RetryableHTTPError,
+    parse_retry_after,
+    redact_url,
+)
 from zaheendata.models import GeoPoint, SourceKind, SourceSearchSpec
 from zaheendata.registry import get_registry
 from zaheendata.settings import get_settings
@@ -128,6 +135,13 @@ async def test_google_places_pagination_and_cache(monkeypatch: pytest.MonkeyPatc
     assert http.ledger.cached["google_places.text_search"] == 2
     assert http.ledger.estimated_usd() == pytest.approx(0.064)
     await http.aclose()
+
+
+def test_redact_url_strips_api_keys():
+    raw = "https://api.sam.gov/entity-information/v3/entities?api_key=secret123&naicsCode=238220"
+    assert "secret123" not in redact_url(raw)
+    assert "api_key=REDACTED" in redact_url(raw)
+    assert "naicsCode=238220" in redact_url(raw)
 
 
 def test_parse_retry_after():
