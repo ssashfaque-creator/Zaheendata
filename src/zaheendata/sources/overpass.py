@@ -44,9 +44,7 @@ class OverpassSource(Source):
             host = url.split("/")[2]
             self.http.set_host_rate(host, 0.2, concurrency=1)
             try:
-                return await self.http.post_json(
-                    url, data={"data": query}, retries=1, timeout_seconds=15.0
-                )
+                return await self.http.post_json(url, data={"data": query}, retries=1, timeout_seconds=15.0)
             except Exception as exc:  # noqa: BLE001 - try the next mirror
                 last_error = exc
                 log.warning(
