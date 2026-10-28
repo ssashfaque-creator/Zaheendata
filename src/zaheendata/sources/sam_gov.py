@@ -150,8 +150,8 @@ class SamGovSource(Source):
             if not entities or page * PAGE_SIZE >= total or seen >= spec.limit * 3:
                 break
 
-    async def find_owner(self, business_name: str, region: str | None) -> OwnerContact | None:
-        """Look a shortlisted business up by legal / DBA name for its point of contact."""
+    async def find_entity(self, business_name: str, region: str | None) -> RawRecord | None:
+        """Look a business up by legal / DBA name (website, address, POC)."""
         target = normalize_name(business_name)
         if not target:
             return None
@@ -165,8 +165,23 @@ class SamGovSource(Source):
                 log.debug("sam_gov.lookup_failed", name=business_name, error=str(exc)[:200])
                 return None
             for e in data.get("entityData") or []:
-                reg = e.get("entityRegistration") or {}
-                names = [reg.get("legalBusinessName"), reg.get("dbaName")]
-                if any(fuzz.token_sort_ratio(target, normalize_name(n or "")) >= 88 for n in names if n):
-                    return _poc(e)
+                rec = parse_entity(e)
+                if rec and fuzz.token_sort_ratio(target, normalize_name(rec.name)) >= 88:
+                    return rec
+        return None
+
+    async def find_owner(self, business_name: str, region: str | None) -> OwnerContact | None:
+        """Look a shortlisted business up by legal / DBA name for its point of contact."""
+        rec = await self.find_entity(business_name, region)
+        if rec is None:
+            return None
+        if rec.owner_name:
+            return OwnerContact(
+                name=rec.owner_name,
+                title=rec.owner_title,
+                email=rec.owner_email,
+                phone=rec.owner_phone,
+                source="sam_gov",
+                confidence=0.6 if rec.owner_email else 0.5,
+            )
         return None

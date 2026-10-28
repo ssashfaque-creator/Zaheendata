@@ -51,6 +51,11 @@ class Settings(BaseSettings):
         ge=1,
         description="Maps lookups on the shortlist pool: short_list_target × this (200 for a 100-lead list).",
     )
+    website_discover_limit: int = Field(
+        default=800,
+        ge=0,
+        description="Max free website/address lookups (DuckDuckGo + Nominatim + SAM/Yelp) per run.",
+    )
     respect_robots_txt: bool = True
     website_max_pages: int = 6
     website_max_bytes: int = 2_000_000

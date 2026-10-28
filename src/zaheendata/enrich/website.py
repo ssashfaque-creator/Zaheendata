@@ -457,6 +457,23 @@ def extract_features(pages: list[CrawledPage], domain: str | None) -> WebsiteFea
         e for e in emails if domain and domain not in e
     ][:3]
     f.phones = sorted({re.sub(r"\D", "", ph)[-10:] for ph in PHONE_RE.findall(text)})[:5]
+    for p in pages:
+        for item in p.jsonld:
+            if not isinstance(item, dict):
+                continue
+            addr = item.get("address")
+            if isinstance(addr, list):
+                addr = addr[0] if addr else None
+            if isinstance(addr, dict):
+                f.street_address = f.street_address or addr.get("streetAddress")
+                f.address_city = f.address_city or addr.get("addressLocality")
+                f.address_region = f.address_region or addr.get("addressRegion")
+                f.address_postal = f.address_postal or addr.get("postalCode")
+            tel = item.get("telephone")
+            if isinstance(tel, str):
+                digits = re.sub(r"\D", "", tel)[-10:]
+                if len(digits) == 10 and digits not in f.phones:
+                    f.phones.insert(0, digits)
     for u in all_links:
         host = urlsplit(u).netloc.lower()
         host = host[4:] if host.startswith("www.") else host

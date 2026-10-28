@@ -94,9 +94,11 @@ State extracts) are merged into any campaign with `zaheen campaign run <id> --im
 - **Terms:** Places data may be cached for 30 days except place ids (indefinitely). Do not display
   it on non-Google maps.
 
-Without a Maps key the engine still runs (registries + website crawl), but the website and review
-rules are skipped and the campaign stats carry `website_filter_skipped` / `review_filter_skipped`
-so nobody mistakes a registry-only list for a vetted one.
+Without a Maps key the engine still runs. During **enrich** it looks up missing websites and
+addresses for free: OpenStreetMap Nominatim, SAM.gov (if keyed), Yelp Fusion (free tier, if keyed),
+then DuckDuckGo HTML search. The first official-looking site is crawled for booking, tools, owner
+name, email and phone so scoring can rank real leads before any Google spend. Website and review
+*exclusion* rules still wait for the maps stage (or are skipped and flagged).
 
 ### Google Maps scraper (`google_maps_scraper`, Playwright) — experimental, off by default
 

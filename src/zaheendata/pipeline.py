@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .enrich import OwnerEnricher, ReviewAnalyzer, TechStackDetector, WebsiteCrawler, extract_features
+from .enrich.discover import DirectoryDiscoverer, completeness, harvest_from_website
 from .enrich.owner import OwnerLookup
 from .filters import PoorFitFilter
 from .geo import AreaMatcher, Geocoder, GeoPlanner, SearchCell
@@ -46,6 +47,7 @@ from .sources import Source, SourceContext, build_sources
 from .sources.google_places import GooglePlacesSource
 from .sources.public_datasets import PublicDatasetSource
 from .sources.sam_gov import SamGovSource
+from .sources.yelp import YelpSource
 from .storage import Database
 
 log = get_logger(__name__)
@@ -297,22 +299,65 @@ class CampaignRunner:
         ctx.stats["candidates_after_filter"] = remaining
         await self._emit("filter", remaining=remaining, rejected=reasons)
 
+    @staticmethod
+    def _place_parts(b: Business, fallback: str) -> tuple[str | None, str | None]:
+        addr = b.address
+        city = addr.city if addr else None
+        region = addr.region if addr else None
+        if (not city or not region) and "," in fallback:
+            left, right = (p.strip() for p in fallback.split(",", 1))
+            city = city or left
+            region = region or (right.split()[0] if right else None)
+        return city, region
+
     async def stage_enrich(self, ctx: RunContext) -> None:
-        """Crawl every website we already have and extract all site fields. No Google Places here."""
+        """Find missing websites/addresses for free, then crawl every site we have. No Google Places."""
         if not ctx.campaign.spec.enrich:
             return
         businesses = await self.db.list_businesses(ctx.campaign.id)
         candidates = [b for b in businesses if b.status != BusinessStatus.REJECTED]
-        # Reviews from Places wait for the maps stage unless the record already has a place id
-        # and the operator opted out of deferral.
+        candidates.sort(
+            key=lambda b: (
+                0 if b.website else 1,
+                0 if (b.address and b.address.line1) else 1,
+                b.name.lower(),
+            )
+        )
         places = None if self.settings.defer_google_places else self._places(ctx)
-        sem = asyncio.Semaphore(self.settings.global_concurrency)
+        sam = next((s for s in ctx.sources if isinstance(s, SamGovSource)), None)
+        yelp = next((s for s in ctx.sources if isinstance(s, YelpSource)), None)
+        discoverer = DirectoryDiscoverer(self.http, self.settings)
+        locs = ctx.campaign.spec.geography.locations
+        discoverer.fallback_where = locs[0] if locs else (ctx.campaign.spec.geography.state or "")
+        sem = asyncio.Semaphore(max(4, self.settings.global_concurrency // 2))
         done = 0
+        discovered = 0
+        budget = self.settings.website_discover_limit
 
         async def enrich_one(b: Business) -> None:
-            nonlocal done
+            nonlocal done, discovered
             async with sem:
+                needs = not b.website or not (b.address and b.address.line1) or not b.phone_e164
+                if needs and discovered < budget:
+                    discovered += 1
+                    city, region = self._place_parts(b, discoverer.fallback_where)
+                    if sam is not None:
+                        try:
+                            rec = await sam.find_entity(b.name, region)
+                            if rec is not None:
+                                attach_record(b, rec)
+                        except Exception as exc:  # noqa: BLE001
+                            log.debug("enrich.sam_failed", business=b.name, error=str(exc)[:200])
+                    if yelp is not None and (not b.phone_e164 or b.review_count is None):
+                        try:
+                            rec = await yelp.match_business(b.name, city, region)
+                            if rec is not None:
+                                attach_record(b, rec)
+                        except Exception as exc:  # noqa: BLE001
+                            log.debug("enrich.yelp_failed", business=b.name, error=str(exc)[:200])
+                    await discoverer.fill(b)
                 await self._enrich_business(b, places)
+                harvest_from_website(b)
             done += 1
             if done % 25 == 0:
                 await self.db.upsert_businesses([b])
@@ -336,11 +381,16 @@ class CampaignRunner:
         await self.db.upsert_businesses(businesses)
         remaining = sum(1 for b in businesses if b.status != BusinessStatus.REJECTED)
         ctx.stats["enriched"] = len(candidates)
+        ctx.stats["websites_discovered"] = sum(1 for b in candidates if b.attributes.get("website_source"))
         ctx.stats["websites_crawled"] = sum(1 for b in candidates if b.website_features.crawled)
         ctx.stats["filter_rejections_after_enrich"] = reasons
         ctx.stats["candidates_after_enrich"] = remaining
         await self._emit(
-            "enrich", enriched=len(candidates), remaining=remaining, crawled=ctx.stats["websites_crawled"]
+            "enrich",
+            enriched=len(candidates),
+            remaining=remaining,
+            crawled=ctx.stats["websites_crawled"],
+            discovered=ctx.stats["websites_discovered"],
         )
 
     async def _match_maps(self, b: Business, places: GooglePlacesSource) -> bool:
@@ -412,8 +462,7 @@ class CampaignRunner:
             key=lambda b: (
                 0 if b.status == BusinessStatus.SELECTED else 1,
                 -(b.score.total if b.score else 0),
-                -int(bool(b.website)),
-                -int(bool(b.website_features.crawled)),
+                *tuple(-part for part in completeness(b)),
                 b.name.lower(),
             )
         )
@@ -449,6 +498,7 @@ class CampaignRunner:
                     elif await self._match_maps(b, places):
                         matched += 1
                 await self._enrich_business(b, places)
+                harvest_from_website(b)
             done += 1
             if done % 10 == 0:
                 await self.db.upsert_businesses([b])

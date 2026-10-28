@@ -128,6 +128,10 @@ class WebsiteFeatures(BaseModel):
     owner_name_candidates: list[str] = Field(default_factory=list)
     emails: list[str] = Field(default_factory=list)
     phones: list[str] = Field(default_factory=list)
+    street_address: str | None = None
+    address_city: str | None = None
+    address_region: str | None = None
+    address_postal: str | None = None
     social_links: dict[str, str] = Field(default_factory=dict)
     instagram_shop_signals: bool = False
     error: str | None = None

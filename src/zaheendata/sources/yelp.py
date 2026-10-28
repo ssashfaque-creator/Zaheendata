@@ -5,7 +5,10 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import ClassVar
 
+from rapidfuzz import fuzz
+
 from ..models import Address, GeoPoint, RawRecord, SourceKind, SourceSearchSpec
+from ..normalize import normalize_name
 from ..registry import get_registry
 from ..settings import Settings
 from .base import Source
@@ -86,3 +89,50 @@ class YelpSource(Source):
                 if len(businesses) < 50:
                     break
                 offset += 50
+
+    async def match_business(self, name: str, city: str | None, region: str | None) -> RawRecord | None:
+        """One Fusion search for a registry name. Free tier; used during enrich, not collect."""
+        where = ", ".join(p for p in (city, region) if p)
+        if not where:
+            return None
+        headers = {"Authorization": f"Bearer {self.settings.secret('yelp_api_key')}"}
+        data = await self.http.get_json(
+            SEARCH_URL,
+            params={"term": name, "location": where, "limit": 5},
+            headers=headers,
+            meter="yelp.search",
+        )
+        target = normalize_name(name)
+        best: tuple[float, RawRecord] | None = None
+        for b in data.get("businesses") or []:
+            loc = b.get("location") or {}
+            coords = b.get("coordinates") or {}
+            rec = RawRecord(
+                source=self.name,
+                source_kind=self.kind,
+                source_id=b.get("id"),
+                url=b.get("url"),
+                name=b.get("name") or "",
+                phone=b.get("display_phone") or b.get("phone"),
+                address=Address(
+                    line1=loc.get("address1"),
+                    city=loc.get("city"),
+                    region=loc.get("state"),
+                    postal_code=loc.get("zip_code"),
+                    country=loc.get("country") or "US",
+                    formatted=", ".join(loc.get("display_address") or []),
+                ),
+                location=GeoPoint(lat=coords["latitude"], lng=coords["longitude"])
+                if coords.get("latitude") is not None
+                else None,
+                categories=[c["alias"] for c in b.get("categories", [])],
+                rating=b.get("rating"),
+                review_count=b.get("review_count"),
+                business_status="CLOSED_PERMANENTLY" if b.get("is_closed") else "OPERATIONAL",
+            )
+            if region and rec.address and rec.address.region and rec.address.region.upper() != region.upper():
+                continue
+            score = float(fuzz.token_set_ratio(target, normalize_name(rec.name)))
+            if score >= 82 and (best is None or score > best[0]):
+                best = (score, rec)
+        return best[1] if best else None

@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from .compliance import ROLE_ACCOUNTS
+from .enrich.discover import completeness
 from .models import Business, BusinessStatus, FitScore, SignalScore
 from .registry import SubSector
 from .settings import Settings, get_settings
@@ -194,8 +195,7 @@ def rank_and_select(businesses: list[Business], top_n: int) -> list[Business]:
     scored.sort(
         key=lambda b: (
             -(b.score.total if b.score else 0),
-            -int(bool(b.website_features.crawled)),
-            -(b.review_count or 0),
+            *tuple(-part for part in completeness(b)),
             b.name.lower(),
         )
     )
