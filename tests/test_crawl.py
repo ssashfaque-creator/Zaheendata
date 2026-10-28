@@ -36,6 +36,29 @@ def test_extract_hvac_signals() -> None:
     assert "stripe" in signals["tech_stack"]
 
 
+def test_jsonld_and_site_extras() -> None:
+    html = """
+    <html><body>
+      <script type="application/ld+json">
+        {"@type":"HVACBusiness","email":"shop@coolair.example",
+         "telephone":"+1-512-555-0199","foundingDate":"1998",
+         "sameAs":["https://www.facebook.com/coolairatx","https://youtube.com/coolair"]}
+      </script>
+      <p>Family owned since 1998. Licensed and insured. Financing available.</p>
+      <a href="tel:5125550100">call</a>
+      <script src="https://www.greensky.com/widget.js"></script>
+    </body></html>
+    """
+    signals = extract_signals(html, "https://coolair.example/")
+    assert signals["founded_year"] == "1998"
+    assert signals["family_owned"] is True
+    assert signals["licensed_bonded_insured"] is True
+    assert "greensky" in signals["financing"]
+    assert "facebook.com/coolairatx" in signals["facebook"]
+    assert "shop@coolair.example" in signals["emails"]
+    assert "+15125550100" in signals["extra_phones"] or "+15125550199" in signals["extra_phones"]
+
+
 def test_junk_owner_copy_is_ignored() -> None:
     html = "<p>Meet the owner At Brooks Custom. Support Filters Warranty.</p>"
     signals = extract_signals(html, "https://brookscustomcomfort.com/")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from html import unescape
 from typing import Callable, Iterable
@@ -11,7 +12,14 @@ from bs4 import BeautifulSoup
 
 from zaheendata.fingerprints import detect_tools, summarize_tools
 from zaheendata.models import Lead
-from zaheendata.normalize import canonicalize_website, email_is_role_account, is_usable_email, looks_like_person
+from zaheendata.normalize import (
+    canonicalize_website,
+    email_is_role_account,
+    is_usable_email,
+    looks_like_person,
+    normalize_phone,
+    parse_socials,
+)
 
 USER_AGENT = "ZaheendataLeadResearch/0.1 (+https://github.com/ssashfaque-creator/Zaheendata)"
 EMAIL_RE = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.I)
@@ -30,6 +38,11 @@ HREF_CANDIDATES = (
     "quote",
     "book",
     "schedule",
+)
+
+FOUNDED_RE = re.compile(
+    r"(?:since|est\.?|established(?:\s+in)?|founded(?:\s+in)?)\s*(?:in\s*)?((?:19|20)\d{2})",
+    re.I,
 )
 
 PAIN_PHRASES = (
@@ -59,6 +72,26 @@ def _contains_any(blob: str, needles: Iterable[str]) -> bool:
     return any(needle.lower() in blob for needle in needles)
 
 
+def _jsonld_blocks(soup: BeautifulSoup) -> list[dict]:
+    blocks: list[dict] = []
+    for tag in soup.find_all("script"):
+        kind = (tag.get("type") or "").lower()
+        if "ld+json" not in kind:
+            continue
+        raw = tag.string or tag.get_text() or ""
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, list):
+            blocks.extend(item for item in data if isinstance(item, dict))
+        elif isinstance(data, dict) and isinstance(data.get("@graph"), list):
+            blocks.extend(item for item in data["@graph"] if isinstance(item, dict))
+        elif isinstance(data, dict):
+            blocks.append(data)
+    return blocks
+
+
 def extract_signals(html: str, url: str) -> dict:
     soup = BeautifulSoup(html, "lxml")
     text = _visible_text(soup)
@@ -68,15 +101,25 @@ def extract_signals(html: str, url: str) -> dict:
     summary = summarize_tools(detect_tools(blob))
     booking = summary["booking_provider"]
     store = summary["store_platform"]
-    instagram = ""
+    socials = parse_socials(html)
+    instagram = socials.get("instagram", "")
+    facebook = socials.get("facebook", "")
+    youtube = socials.get("youtube", "")
+    owner_linkedin = socials.get("owner_linkedin", "")
     owner_on_site = ""
+    extra_phones: list[str] = []
     for anchor in soup.find_all("a", href=True):
         href = anchor["href"]
-        if "instagram.com" in href and not instagram:
-            instagram = href.split("?")[0]
         lowered = href.lower()
-        if "linkedin.com/in/" in lowered and looks_like_person(anchor.get_text(" ", strip=True)):
-            owner_on_site = owner_on_site or anchor.get_text(" ", strip=True)
+        if lowered.startswith("tel:"):
+            phone = normalize_phone(href.split(":", 1)[-1])
+            if phone:
+                extra_phones.append(phone)
+        if "linkedin.com/in/" in lowered:
+            owner_linkedin = owner_linkedin or href.split("?")[0]
+            label = anchor.get_text(" ", strip=True)
+            if looks_like_person(label):
+                owner_on_site = owner_on_site or label
     owner_match = re.search(
         r"(?i:owned by|meet the owner|i['’]m the owner|owner[:\-])\s+([A-Z][a-z]+)\s+([A-Z][a-z]+)\b",
         text,
@@ -85,6 +128,37 @@ def extract_signals(html: str, url: str) -> dict:
         candidate = f"{owner_match.group(1)} {owner_match.group(2)}"
         if looks_like_person(candidate):
             owner_on_site = owner_on_site or candidate
+
+    for block in _jsonld_blocks(soup):
+        email = block.get("email")
+        if isinstance(email, str) and is_usable_email(email):
+            emails.append(email.lower())
+        phone = block.get("telephone")
+        if isinstance(phone, str):
+            parsed = normalize_phone(phone)
+            if parsed:
+                extra_phones.append(parsed)
+        same = block.get("sameAs")
+        if isinstance(same, str):
+            same = [same]
+        if isinstance(same, list):
+            socials.update(parse_socials(" ".join(str(item) for item in same)))
+
+    founded_year = ""
+    founded_match = FOUNDED_RE.search(text)
+    if founded_match:
+        founded_year = founded_match.group(1)
+    else:
+        for block in _jsonld_blocks(soup):
+            founded = str(block.get("foundingDate") or "")
+            year_match = re.search(r"((?:19|20)\d{2})", founded)
+            if year_match:
+                founded_year = year_match.group(1)
+                break
+
+    finance_names = [name for name in summary["tech_stack"].split(",") if name in {"greensky", "synchrony", "wisetack", "affirm"}]
+    if not finance_names and _contains_any(blob, ("financing available", "0% financing", "monthly payments")):
+        finance_names = ["financing_mentioned"]
 
     has_form = bool(soup.find("form"))
     quote_form = has_form and _contains_any(blob, ("quote", "estimate", "request service", "schedule"))
@@ -100,7 +174,7 @@ def extract_signals(html: str, url: str) -> dict:
             child_links.append(canonicalize_website(href) or href)
 
     return {
-        "emails": emails[:8],
+        "emails": sorted(set(emails))[:8],
         "booking_provider": booking,
         "online_booking": bool(booking) or "book now" in blob or "schedule online" in blob,
         "quote_form": quote_form,
@@ -113,11 +187,22 @@ def extract_signals(html: str, url: str) -> dict:
         "store_platform": store,
         "sells_gift_cards": "gift card" in blob or "gift certificate" in blob,
         "hosts_events": _contains_any(blob, ("tournament", "game night", "workshop", "wedding")),
-        "instagram": instagram,
+        "instagram": instagram or socials.get("instagram", ""),
+        "facebook": facebook or socials.get("facebook", ""),
+        "youtube": youtube or socials.get("youtube", ""),
+        "owner_linkedin": owner_linkedin,
         "tech_stack": summary["tech_stack"],
         "tool_categories": summary["tool_categories"],
         "pain_examples": "; ".join(pain),
+        "pain_mentions": str(len(pain)),
         "owner_on_site": owner_on_site,
+        "founded_year": founded_year,
+        "family_owned": _contains_any(blob, ("family owned", "family-owned", "family operated")),
+        "financing": ",".join(finance_names),
+        "licensed_bonded_insured": _contains_any(
+            blob, ("licensed and insured", "licensed, bonded", "bonded and insured", "bonded & insured")
+        ),
+        "extra_phones": ",".join(dict.fromkeys(extra_phones)),
         "child_links": list(dict.fromkeys(child_links))[:6],
         "text_excerpt": text[:1500],
         "html": html[:MAX_BYTES],
@@ -128,7 +213,7 @@ def merge_signals(target: dict, incoming: dict) -> dict:
     for key, value in incoming.items():
         if key in {"emails", "child_links"}:
             target[key] = list(dict.fromkeys([*target.get(key, []), *value]))
-        elif key in {"tech_stack", "tool_categories"}:
+        elif key in {"tech_stack", "tool_categories", "extra_phones", "financing"}:
             items = {part for part in f"{target.get(key, '')},{value}".split(",") if part}
             target[key] = ",".join(sorted(items))
         elif key == "pain_examples":
@@ -163,9 +248,23 @@ def apply_signals(lead: Lead, signals: dict) -> Lead:
     lead.sells_gift_cards = signals.get("sells_gift_cards") or False
     lead.hosts_events = signals.get("hosts_events") or False
     lead.instagram = signals.get("instagram") or lead.instagram
-    lead.tech_stack = signals.get("tech_stack") or ""
-    lead.tool_categories = signals.get("tool_categories") or ""
+    lead.facebook = signals.get("facebook") or lead.facebook
+    lead.youtube = signals.get("youtube") or lead.youtube
+    lead.owner_linkedin = signals.get("owner_linkedin") or lead.owner_linkedin
+    lead.founded_year = signals.get("founded_year") or lead.founded_year
+    lead.family_owned = signals.get("family_owned") or lead.family_owned
+    lead.financing = signals.get("financing") or lead.financing
+    lead.licensed_bonded_insured = signals.get("licensed_bonded_insured") or lead.licensed_bonded_insured
+    extra_phones = signals.get("extra_phones") or ""
+    lead.extra_phones = extra_phones
+    if extra_phones and not lead.owner_phone:
+        first = extra_phones.split(",")[0]
+        if first != lead.phone:
+            lead.owner_phone = first
+    lead.tech_stack = signals.get("tech_stack") or lead.tech_stack
+    lead.tool_categories = signals.get("tool_categories") or lead.tool_categories
     lead.pain_examples = signals.get("pain_examples") or ""
+    lead.pain_mentions = signals.get("pain_mentions") or lead.pain_mentions
     if signals.get("html"):
         lead.extra["_html"] = str(signals["html"])[:MAX_BYTES]
     if signals.get("owner_on_site") and not looks_like_person(lead.owner_name):

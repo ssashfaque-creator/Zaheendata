@@ -11,6 +11,13 @@ def test_franchise_rejected() -> None:
     assert "mr rooter" in lead.rejection_reason
 
 
+def test_electrical_off_taxonomy_rejected() -> None:
+    lead = empty_lead(name="NXP Semiconductors", website="https://nxp.com")
+    classify(lead, get_subsector("electrical"), require_reviews=False)
+    assert lead.status == "rejected"
+    assert "off-taxonomy" in lead.rejection_reason
+
+
 def test_directory_website_rejected() -> None:
     lead = empty_lead(
         name="Local HVAC",

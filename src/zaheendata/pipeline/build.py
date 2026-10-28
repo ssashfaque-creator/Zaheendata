@@ -8,7 +8,14 @@ from zaheendata.pipeline.download import download_licenses_for, download_overtur
 from zaheendata.pipeline.enrich import apply_stored_technologies, enrich_commoncrawl, enrich_live
 from zaheendata.pipeline.export import write_csv
 from zaheendata.pipeline.filter import keep_for_enrichment
-from zaheendata.pipeline.ingest import attach_warehouse_overlays, ingest_license_json, ingest_overture_parquet, ingest_ppp_file, places_to_leads
+from zaheendata.pipeline.ingest import (
+    attach_warehouse_overlays,
+    dedupe_leads,
+    ingest_license_json,
+    ingest_overture_parquet,
+    ingest_ppp_file,
+    places_to_leads,
+)
 from zaheendata.pipeline.score import rank_leads, score_lead
 from zaheendata.subsectors import get_subsector
 from zaheendata.warehouse import connect, warehouse_stats
@@ -75,6 +82,15 @@ LEAD_COLUMNS = (
     "subsector_signal",
     "score_evidence",
     "subsector",
+    "facebook",
+    "youtube",
+    "founded_year",
+    "family_owned",
+    "financing",
+    "licensed_bonded_insured",
+    "extra_phones",
+    "brand",
+    "license_type",
 )
 LEAD_INSERT_SQL = (
     "INSERT OR REPLACE INTO leads ("
@@ -149,6 +165,15 @@ def _lead_values(lead: Lead) -> list:
         lead.subsector_signal if lead.subsector_signal != "" else None,
         row["score_evidence"],
         lead.extra.get("subsector") or "",
+        row["facebook"],
+        row["youtube"],
+        row["founded_year"],
+        bool(lead.family_owned) if lead.family_owned != "" else None,
+        row["financing"],
+        bool(lead.licensed_bonded_insured) if lead.licensed_bonded_insured != "" else None,
+        row["extra_phones"],
+        row["brand"],
+        row["license_type"],
     ]
 
 
@@ -220,7 +245,7 @@ def build_national(
     if parquet.exists():
         summary["ingested"] = ingest_overture_parquet(parquet, warehouse)
 
-    leads = places_to_leads(warehouse, subsector=subsector_key, own_website_only=True)
+    leads = dedupe_leads(places_to_leads(warehouse, subsector=subsector_key, own_website_only=True))
     attach_warehouse_overlays(leads, warehouse)
     enrichable = keep_for_enrichment(leads, subsector, require_reviews=False)
     summary["discovered"] = len(leads)

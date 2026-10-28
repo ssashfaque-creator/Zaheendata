@@ -166,6 +166,21 @@ def connect(path: Path | None = None, *, remote: bool = False) -> duckdb.DuckDBP
             pass
         con.execute("SET s3_region='us-west-2';")
     con.execute(SCHEMA_SQL)
+    for column, typ in (
+        ("facebook", "TEXT"),
+        ("youtube", "TEXT"),
+        ("founded_year", "TEXT"),
+        ("family_owned", "BOOLEAN"),
+        ("financing", "TEXT"),
+        ("licensed_bonded_insured", "BOOLEAN"),
+        ("extra_phones", "TEXT"),
+        ("brand", "TEXT"),
+        ("license_type", "TEXT"),
+    ):
+        try:
+            con.execute(f"ALTER TABLE leads ADD COLUMN {column} {typ}")
+        except duckdb.Error:
+            pass
     return con
 
 

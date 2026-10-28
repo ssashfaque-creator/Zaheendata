@@ -65,6 +65,15 @@ EXPORT_COLUMNS = [
     "owner_reachable",
     "subsector_signal",
     "score_evidence",
+    "facebook",
+    "youtube",
+    "founded_year",
+    "family_owned",
+    "financing",
+    "licensed_bonded_insured",
+    "extra_phones",
+    "brand",
+    "license_type",
 ]
 
 
@@ -130,6 +139,15 @@ class Lead:
     owner_reachable: int | str = ""
     subsector_signal: int | str = ""
     score_evidence: str = ""
+    facebook: str = ""
+    youtube: str = ""
+    founded_year: str = ""
+    family_owned: bool | str = ""
+    financing: str = ""
+    licensed_bonded_insured: bool | str = ""
+    extra_phones: str = ""
+    brand: str = ""
+    license_type: str = ""
     extra: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def merge_source(self, label: str) -> None:

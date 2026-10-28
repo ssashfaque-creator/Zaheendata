@@ -232,6 +232,25 @@ def is_usable_email(email: str | None) -> bool:
     return True
 
 
+def parse_socials(blob: str | None) -> dict[str, str]:
+    found: dict[str, str] = {}
+    text = blob or ""
+    for match in re.finditer(r"https?://[^\s\"'<>]+", text, re.I):
+        url = match.group(0).rstrip(").,]}")
+        host = domain_from_url(url)
+        if "instagram.com" in host and "instagram" not in found:
+            found["instagram"] = url.split("?")[0]
+        elif "facebook.com" in host and "facebook" not in found:
+            found["facebook"] = url.split("?")[0]
+        elif ("youtube.com" in host or "youtu.be" in host) and "youtube" not in found:
+            found["youtube"] = url.split("?")[0]
+        elif "linkedin.com/in/" in url.lower() and "owner_linkedin" not in found:
+            found["owner_linkedin"] = url.split("?")[0]
+        elif "linkedin.com/company/" in url.lower() and "linkedin" not in found:
+            found["linkedin"] = url.split("?")[0]
+    return found
+
+
 def token_set(value: str | None) -> set[str]:
     return {token for token in normalize_name(value).split() if len(token) > 1}
 

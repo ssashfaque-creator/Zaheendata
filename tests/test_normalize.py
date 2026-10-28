@@ -6,6 +6,7 @@ from zaheendata.normalize import (
     name_similarity,
     normalize_name,
     normalize_phone,
+    parse_socials,
     person_display_name,
 )
 
@@ -31,6 +32,12 @@ def test_person_vs_company() -> None:
 
 def test_person_display_flips_last_first() -> None:
     assert person_display_name("BURGOS, DAVID") == "David Burgos"
+
+
+def test_parse_socials_from_overture_blob() -> None:
+    found = parse_socials('["https://www.facebook.com/coolair","https://instagram.com/coolairatx"]')
+    assert "facebook.com/coolair" in found["facebook"]
+    assert "instagram.com/coolairatx" in found["instagram"]
 
 
 def test_placeholder_emails_are_not_usable() -> None:

@@ -57,7 +57,7 @@ def _write_places_parquet(path: Path) -> None:
 
 
 def test_lead_insert_placeholders_match_columns() -> None:
-    assert LEAD_INSERT_SQL.count("?") == len(LEAD_COLUMNS) == 61
+    assert LEAD_INSERT_SQL.count("?") == len(LEAD_COLUMNS) == 70
     assert len(_lead_values(empty_lead(name="Cool Air"))) == len(LEAD_COLUMNS)
 
 
@@ -103,6 +103,23 @@ def test_ingest_filters_directories_and_overlays(tmp_path: Path) -> None:
     assert stats["licenses"] == 1
     assert stats["leads"] == 1
     assert stats["by_subsector"]["plumbing_hvac"] == 3
+
+
+def test_dedupe_merges_same_domain() -> None:
+    from zaheendata.pipeline.ingest import dedupe_leads
+
+    a = empty_lead(name="Cold is on the Right", website="https://www.coldisontheright.com/", domain="coldisontheright.com")
+    b = empty_lead(
+        name="Cold Is On The Right Plumbing & Air",
+        website="https://www.coldisontheright.com/",
+        domain="coldisontheright.com",
+        owner_email="office@coldisontheright.com",
+        license_number="117732",
+    )
+    merged = dedupe_leads([a, b])
+    assert len(merged) == 1
+    assert merged[0].license_number == "117732"
+    assert merged[0].owner_email == "office@coldisontheright.com"
 
 
 def test_license_fuzzy_name_and_phone_match(tmp_path: Path) -> None:

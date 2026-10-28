@@ -16,6 +16,7 @@ from zaheendata.normalize import (
     looks_like_person,
     name_key,
     normalize_phone,
+    parse_socials,
     person_display_name,
     phone_key,
 )
@@ -145,7 +146,7 @@ def places_to_leads(
         f"""
         SELECT id, name, phone, website, email, address, city, state, postal_code,
                lat, lng, domain, subsector, naics, taxonomy_primary, socials,
-               own_website, source, confidence
+               own_website, source, confidence, brand
         FROM places
         {where}
         {limit_sql}
@@ -160,13 +161,7 @@ def places_to_leads(
         website = canonicalize_website(data.get("website") or "")
         if website and not is_own_website(website):
             website = ""
-        socials = data.get("socials") or ""
-        instagram = ""
-        if "instagram.com" in socials:
-            for part in socials.replace('"', " ").replace("'", " ").split():
-                if "instagram.com" in part:
-                    instagram = part.strip("[],")
-                    break
+        parsed = parse_socials(str(data.get("socials") or ""))
         lead = empty_lead(
             name=data.get("name") or "",
             phone=normalize_phone(data.get("phone")),
@@ -183,7 +178,11 @@ def places_to_leads(
             naics=data.get("naics") or "",
             categories=data.get("taxonomy_primary") or "",
             business_id=data.get("id") or "",
-            instagram=instagram,
+            instagram=parsed.get("instagram", ""),
+            facebook=parsed.get("facebook", ""),
+            youtube=parsed.get("youtube", ""),
+            owner_linkedin=parsed.get("owner_linkedin", ""),
+            brand=data.get("brand") or "",
             status="discovered",
         )
         lead.merge_source("overture")
@@ -196,7 +195,7 @@ def places_to_leads(
 def attach_warehouse_overlays(leads: list[Lead], warehouse: Path | None = None) -> list[Lead]:
     con = connect(warehouse)
     licenses = con.execute(
-        "SELECT business_name, owner_name, owner_is_person, license_number, license_status, phone, name_key, source FROM licenses"
+        "SELECT business_name, owner_name, owner_is_person, license_number, license_status, phone, name_key, source, license_type FROM licenses"
     ).fetchall()
     ppp_rows = con.execute(
         "SELECT borrower_name, jobs_reported, franchise_name, name_key, state FROM ppp"
@@ -231,12 +230,15 @@ def attach_warehouse_overlays(leads: list[Lead], warehouse: Path | None = None) 
             lead.merge_source(lic[7] or "license")
             lead.license_number = lic[3] or lead.license_number
             lead.license_status = lic[4] or lead.license_status
+            lead.license_type = (lic[8] if len(lic) > 8 else "") or lead.license_type
             owner = person_display_name(lic[1]) if lic[1] else ""
             if looks_like_person(owner) or looks_like_person(lic[1]):
                 lead.owner_name = owner or lead.owner_name
                 lead.owner_source = lic[7] or "license"
                 lead.owner_confidence = 0.8
                 lead.owner_title = lead.owner_title or "Owner / license holder"
+                if lic[5] and not lead.owner_phone:
+                    lead.owner_phone = normalize_phone(lic[5]) or lead.owner_phone
             if lic[5] and not lead.phone:
                 lead.phone = normalize_phone(lic[5]) or lead.phone
         ppp = ppp_by_key.get(name_key(lead.name))
@@ -249,3 +251,31 @@ def attach_warehouse_overlays(leads: list[Lead], warehouse: Path | None = None) 
                 if hit and not lead.rejection_reason:
                     lead.extra["ppp_franchise"] = hit
     return leads
+
+
+def dedupe_leads(leads: list[Lead]) -> list[Lead]:
+    kept: dict[str, Lead] = {}
+    leftover: list[Lead] = []
+    for lead in leads:
+        key = (lead.domain or "").lower() or f"name:{name_key(lead.name)}|{lead.city.lower()}"
+        existing = kept.get(key)
+        if existing is None:
+            kept[key] = lead
+            continue
+        if looks_like_person(lead.owner_name) and not looks_like_person(existing.owner_name):
+            existing.owner_name = lead.owner_name
+            existing.owner_source = lead.owner_source
+            existing.owner_confidence = lead.owner_confidence
+        if lead.owner_email and not existing.owner_email:
+            existing.owner_email = lead.owner_email
+        if lead.license_number and not existing.license_number:
+            existing.license_number = lead.license_number
+            existing.license_status = lead.license_status
+            existing.license_type = lead.license_type
+        if lead.tech_stack and not existing.tech_stack:
+            existing.tech_stack = lead.tech_stack
+            existing.tool_categories = lead.tool_categories
+        for source in (lead.sources or "").split(";"):
+            existing.merge_source(source.strip())
+        leftover.append(lead)
+    return list(kept.values())

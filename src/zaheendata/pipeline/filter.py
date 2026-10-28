@@ -5,6 +5,11 @@ from zaheendata.models import Lead
 from zaheendata.normalize import is_own_website
 from zaheendata.subsectors import Subsector
 
+OFF_TAXONOMY = {
+    "electrical": ("semiconductor", "nxp", "fence", "tree tamer", "tree service", "irrigation"),
+    "plumbing_hvac": ("semiconductor", "solar panel distributor", "johnstone"),
+}
+
 
 def _review_count(lead: Lead) -> int:
     try:
@@ -25,6 +30,13 @@ def classify(
         lead.status = "rejected"
         lead.rejection_reason = f"franchise/chain: franchise brand: {brand}"
         return lead
+
+    haystack = f"{lead.name} {lead.categories}".lower()
+    for token in OFF_TAXONOMY.get(subsector.key, ()):
+        if token in haystack:
+            lead.status = "rejected"
+            lead.rejection_reason = f"off-taxonomy: {token}"
+            return lead
 
     if lead.website and not is_own_website(lead.website):
         lead.status = "rejected"

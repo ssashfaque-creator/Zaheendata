@@ -86,6 +86,10 @@ FINGERPRINTS: tuple[Fingerprint, ...] = (
     Fingerprint("nextiva", "phone", ("nextiva.com",)),
     Fingerprint("toast", "pos", ("toasttab.com",)),
     Fingerprint("shopify_inbox", "chat", ("shopifycloud.com/shopify-inbox",)),
+    Fingerprint("greensky", "financing", ("greensky.com", "greenskycredit.com")),
+    Fingerprint("synchrony", "financing", ("synchrony.com", "mysynchrony.com")),
+    Fingerprint("wisetack", "financing", ("wisetack.com",)),
+    Fingerprint("affirm", "financing", ("affirm.com", "cdn1.affirm.com")),
 )
 
 BOOKING_TOOLS = {
