@@ -103,7 +103,7 @@ class GooglePlacesSource(Source):
 
     @classmethod
     def available(cls, settings: Settings) -> bool:
-        return settings.google_maps_api_key is not None
+        return bool(settings.secret("google_maps_api_key"))
 
     @classmethod
     def unavailable_reason(cls, settings: Settings) -> str | None:

@@ -6,7 +6,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -15,7 +15,11 @@ DEFAULT_CONFIG_DIR = PROJECT_ROOT / "config"
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="ZAHEEN_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+        env_prefix="ZAHEEN_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        env_ignore_empty=True,
     )
 
     # --- runtime -----------------------------------------------------------
@@ -110,9 +114,27 @@ class Settings(BaseSettings):
     api_port: int = 8000
     api_token: SecretStr | None = None
 
+    @field_validator(
+        "google_maps_api_key",
+        "yelp_api_key",
+        "sam_gov_api_key",
+        "census_api_key",
+        "openai_api_key",
+        "api_token",
+        mode="before",
+    )
+    @classmethod
+    def _blank_secret_is_missing(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     def secret(self, name: str) -> str | None:
         value = getattr(self, name)
-        return value.get_secret_value() if value is not None else None
+        if value is None:
+            return None
+        text = value.get_secret_value().strip()
+        return text or None
 
 
 @lru_cache

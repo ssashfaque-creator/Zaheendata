@@ -17,6 +17,19 @@ from zaheendata.sources.csv_import import CsvImportSource, auto_map, row_to_reco
 from zaheendata.sources.google_places import SEARCH_URL, GooglePlacesSource, parse_place
 
 
+def test_blank_api_keys_are_treated_as_missing(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("ZAHEEN_YELP_API_KEY", "")
+    monkeypatch.setenv("ZAHEEN_GOOGLE_MAPS_API_KEY", "   ")
+    get_settings.cache_clear()
+    settings = get_settings()
+    assert settings.secret("yelp_api_key") is None
+    assert settings.secret("google_maps_api_key") is None
+    described = {s["name"]: s for s in describe_sources(settings)}
+    assert described["yelp"]["available"] is False
+    assert described["google_places"]["available"] is False
+    get_settings.cache_clear()
+
+
 def test_sources_disabled_without_keys():
     described = {s["name"]: s for s in describe_sources(get_settings())}
     assert described["google_places"]["available"] is False

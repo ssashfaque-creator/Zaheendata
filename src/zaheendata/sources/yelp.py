@@ -25,15 +25,18 @@ class YelpSource(Source):
 
     @classmethod
     def available(cls, settings: Settings) -> bool:
-        return settings.yelp_api_key is not None
+        return bool(settings.secret("yelp_api_key"))
 
     @classmethod
     def unavailable_reason(cls, settings: Settings) -> str | None:
         return None if cls.available(settings) else "set ZAHEEN_YELP_API_KEY"
 
     async def search(self, spec: SourceSearchSpec) -> AsyncIterator[RawRecord]:
+        key = self.settings.secret("yelp_api_key")
+        if not key:
+            return
         subsector = get_registry().get(spec.subsector_key)
-        headers = {"Authorization": f"Bearer {self.settings.secret('yelp_api_key')}"}
+        headers = {"Authorization": f"Bearer {key}"}
         seen: set[str] = set()
         terms = [None] if subsector.yelp_categories else spec.queries
         for term in terms:
@@ -93,9 +96,10 @@ class YelpSource(Source):
     async def match_business(self, name: str, city: str | None, region: str | None) -> RawRecord | None:
         """One Fusion search for a registry name. Free tier; used during enrich, not collect."""
         where = ", ".join(p for p in (city, region) if p)
-        if not where:
+        key = self.settings.secret("yelp_api_key")
+        if not where or not key:
             return None
-        headers = {"Authorization": f"Bearer {self.settings.secret('yelp_api_key')}"}
+        headers = {"Authorization": f"Bearer {key}"}
         data = await self.http.get_json(
             SEARCH_URL,
             params={"term": name, "location": where, "limit": 5},
