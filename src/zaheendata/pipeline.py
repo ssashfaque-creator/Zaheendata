@@ -144,6 +144,7 @@ class CampaignRunner:
     async def stage_collect(self, ctx: RunContext) -> None:
         spec = ctx.campaign.spec
         target = spec.long_list_target or self.settings.long_list_target
+        cap = max(target, int(target * 1.15))
         await self.db.clear_raw_records(ctx.campaign.id)
         per_source: Counter[str] = Counter()
         unique_keys: set[str] = set()
@@ -151,6 +152,7 @@ class CampaignRunner:
         lock = asyncio.Lock()
         sem = asyncio.Semaphore(max(1, self.settings.global_concurrency // 2))
         emp_min, emp_max = self.settings.employee_min, self.settings.employee_max
+        kind_order = {"registry": 0, "import": 1, "vendor": 1, "license": 2, "maps": 3, "directory": 4}
 
         async def run_cell(source: Source, cell: SearchCell | None) -> None:
             if stop.is_set():
@@ -168,15 +170,15 @@ class CampaignRunner:
                 county=cell.county if cell else None,
                 employee_min=emp_min,
                 employee_max=emp_max,
-                limit=max(60, target // max(1, len(ctx.cells))),
+                limit=max(target, target // max(1, len(ctx.cells))),
             )
             batch: list[RawRecord] = []
             try:
                 async with sem:
                     async for rec in source.search(search_spec):
                         batch.append(rec)
-                        if len(batch) >= 200:
-                            await self._flush(ctx, batch, per_source, unique_keys, lock)
+                        if len(batch) >= 25:
+                            await self._flush(ctx, batch, per_source, unique_keys, lock, cap, stop)
                             batch = []
                         if stop.is_set():
                             break
@@ -190,13 +192,11 @@ class CampaignRunner:
                 ctx.stats.setdefault("source_errors", []).append(
                     {"source": source.name, "error": str(exc)[:300]}
                 )
-            await self._flush(ctx, batch, per_source, unique_keys, lock)
-            # Stop expanding once the long list is comfortably above target (resolution shrinks it).
-            if len(unique_keys) >= int(target * 1.6):
-                stop.set()
+            await self._flush(ctx, batch, per_source, unique_keys, lock, cap, stop)
 
         tasks = []
-        for source in ctx.sources:
+        ordered = sorted(ctx.sources, key=lambda s: kind_order.get(s.kind.value, 9))
+        for source in ordered:
             if self.settings.defer_google_places and source.name in {"google_places", "google_maps_scraper"}:
                 ctx.stats.setdefault("collect_skipped_sources", []).append(source.name)
                 continue
@@ -224,6 +224,8 @@ class CampaignRunner:
         per_source: Counter[str],
         unique: set[str],
         lock: asyncio.Lock,
+        cap: int,
+        stop: asyncio.Event,
     ) -> None:
         if not batch:
             return
@@ -231,11 +233,10 @@ class CampaignRunner:
             await self.db.add_raw_records(ctx.campaign.id, batch)
             for r in batch:
                 per_source[r.source] += 1
-                unique.add(
-                    r.phone
-                    or (r.website or "").lower()
-                    or f"{r.name.lower()}|{(r.address.postal_code if r.address else '')}"
-                )
+                zipc = (r.address.postal_code if r.address else "") or ""
+                unique.add("|".join((r.name.lower(), r.phone or "", (r.website or "").lower(), zipc[:5])))
+            if len(unique) >= cap or sum(per_source.values()) >= cap:
+                stop.set()
 
     async def stage_resolve(self, ctx: RunContext) -> None:
         records = await self.db.list_raw_records(ctx.campaign.id)
@@ -320,9 +321,12 @@ class CampaignRunner:
             key=lambda b: (
                 0 if b.website else 1,
                 0 if (b.address and b.address.line1) else 1,
+                0 if b.phone_e164 else 1,
                 b.name.lower(),
             )
         )
+        pool = ctx.campaign.spec.long_list_target or self.settings.long_list_target
+        candidates = candidates[:pool]
         places = None if self.settings.defer_google_places else self._places(ctx)
         sam = next((s for s in ctx.sources if isinstance(s, SamGovSource)), None)
         yelp = next((s for s in ctx.sources if isinstance(s, YelpSource)), None)
@@ -332,7 +336,9 @@ class CampaignRunner:
         sem = asyncio.Semaphore(max(4, self.settings.global_concurrency // 2))
         done = 0
         discovered = 0
-        budget = self.settings.website_discover_limit
+        budget = min(self.settings.website_discover_limit or pool, pool)
+        pending: list[Business] = []
+        pending_lock = asyncio.Lock()
 
         async def enrich_one(b: Business) -> None:
             nonlocal done, discovered
@@ -358,12 +364,21 @@ class CampaignRunner:
                     await discoverer.fill(b)
                 await self._enrich_business(b, places)
                 harvest_from_website(b)
-            done += 1
-            if done % 25 == 0:
-                await self.db.upsert_businesses([b])
-                await self._emit("enrich.progress", done=done, total=len(candidates))
+            async with pending_lock:
+                pending.append(b)
+                done += 1
+                flush = pending[:] if len(pending) >= 10 else []
+                if flush:
+                    pending.clear()
+                progress = done
+            if flush:
+                await self.db.upsert_businesses(flush)
+            if progress % 10 == 0:
+                await self._emit("enrich.progress", done=progress, total=len(candidates))
 
         await asyncio.gather(*(enrich_one(b) for b in candidates))
+        if pending:
+            await self.db.upsert_businesses(pending)
         # Re-check franchise language discovered on the site. Website / review cuts stay deferred
         # for records that still lack a URL or a review count.
         area = AreaMatcher(ctx.campaign.spec.geography, ctx.cells)

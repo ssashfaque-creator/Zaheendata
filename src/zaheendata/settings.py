@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     redis_url: str | None = None
 
     # --- crawling / politeness ---------------------------------------------
-    user_agent: str = "ZaheendataBot/0.1 (+https://example.com/bot; business-directory research)"
+    user_agent: str = "Zaheendata/0.2 (+https://github.com/ssashfaque-creator/Zaheendata; directory research)"
     http_timeout_seconds: float = 20.0
     http_max_retries: int = 4
     global_concurrency: int = 16

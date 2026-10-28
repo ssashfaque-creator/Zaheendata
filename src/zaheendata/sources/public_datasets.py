@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from rapidfuzz import fuzz
 
 from ..logging import get_logger
-from ..models import OwnerContact, RawRecord, SourceKind, SourceSearchSpec
+from ..models import Address, OwnerContact, RawRecord, SourceKind, SourceSearchSpec
 from ..normalize import normalize_name
 from ..registry import SubSector, get_registry
 from ..settings import get_settings
@@ -118,6 +118,45 @@ def _person_name(value: str, last_first: bool) -> str:
     return value.title() if value.isupper() else value
 
 
+_CITY_STATE_ZIP = re.compile(
+    r"^\s*(.+?)[,\s]+([A-Z]{2})\s+(\d{5})(?:-\d{4})?\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_city_state_zip(value: str | None) -> tuple[str | None, str | None, str | None]:
+    """Split TDLR-style ``AUSTIN, TX 78701`` into city, state, ZIP."""
+    if not value or not str(value).strip():
+        return None, None, None
+    m = _CITY_STATE_ZIP.match(str(value).strip())
+    if not m:
+        return None, None, None
+    city = m.group(1).strip(" ,").title()
+    return (city or None), m.group(2).upper(), m.group(3)
+
+
+def _apply_city_state_zip(ds: PublicDataset, row: dict[str, Any], rec: RawRecord) -> None:
+    col = ds.columns.get("city_state_zip")
+    if not col:
+        return
+    city, region, postal = parse_city_state_zip(str(row.get(col) or "") or None)
+    if not (city or region or postal):
+        return
+    addr = rec.address or Address()
+    if city and not addr.city:
+        addr.city = city
+    if region and not addr.region:
+        addr.region = region
+    if postal and not addr.postal_code:
+        addr.postal_code = postal
+    rec.address = addr
+
+
+def _has_contact(rec: RawRecord) -> bool:
+    addr = rec.address
+    return bool(rec.phone or rec.website or (addr and (addr.line1 or addr.city or addr.postal_code)))
+
+
 def socrata_metadata_url(resource_url: str) -> str | None:
     """https://host/resource/abcd-1234.json -> https://host/api/views/abcd-1234.json"""
     m = re.match(r"^(https?://[^/]+)/resource/([a-z0-9]{4}-[a-z0-9]{4})\.json", resource_url)
@@ -206,18 +245,26 @@ class PublicDatasetSource(Source):
                     parts.append(like)
         return " AND ".join(parts) if parts else None
 
-    async def _iter_socrata(self, ds: PublicDataset, where: str | None) -> AsyncIterator[dict[str, Any]]:
+    async def _iter_socrata(
+        self, ds: PublicDataset, where: str | None, max_rows: int | None = None
+    ) -> AsyncIterator[dict[str, Any]]:
         offset = 0
+        fetched = 0
         while True:
-            params: dict[str, Any] = {"$limit": ds.page_size, "$offset": offset}
+            remaining = None if max_rows is None else max_rows - fetched
+            if remaining is not None and remaining <= 0:
+                return
+            page = ds.page_size if remaining is None else min(ds.page_size, remaining)
+            params: dict[str, Any] = {"$limit": page, "$offset": offset}
             if where:
                 params["$where"] = where
             rows = await self.http.get_json(ds.url, params=params, meter="socrata.query")
             for row in rows:
                 yield row
-            if len(rows) < ds.page_size:
+            fetched += len(rows)
+            if len(rows) < page:
                 break
-            offset += ds.page_size
+            offset += page
 
     async def _csv_path(self, ds: PublicDataset) -> Path:
         path = self.settings.data_dir / "datasets" / f"{ds.key}.csv"
@@ -269,13 +316,12 @@ class PublicDatasetSource(Source):
         for ds, tag, patterns in self._plan(subsector, spec):
             regexes = [re.compile(p, re.IGNORECASE) for p in patterns]
             count = 0
-            # A metro campaign against a dataset with no city/county column would pull the whole state;
-            # keep a generous cap so one registry cannot swamp the long list (the area filter does the rest).
-            narrowable = bool(ds.city_column or (ds.county_column and spec.county) or ds.columns.get("city"))
-            cap = None if narrowable or not city else max(spec.limit * 10, 2000)
+            skipped_bare = 0
+            # Never let one licence roll dump thousands of name-only rows into a 200-company test.
+            cap = max(50, spec.limit)
             try:
                 rows = (
-                    self._iter_socrata(ds, self._where(ds, spec, patterns))
+                    self._iter_socrata(ds, self._where(ds, spec, patterns), max_rows=cap * 3)
                     if ds.type == "socrata"
                     else self._iter_csv(ds)
                 )
@@ -285,6 +331,7 @@ class PublicDatasetSource(Source):
                     rec = row_to_record(row, ds.columns, f"{ds.kind}:{ds.key}", spec.naics, ds.source_kind)
                     if rec is None:
                         continue
+                    _apply_city_state_zip(ds, row, rec)
                     dba = str(row.get(ds.dba_column) or "").strip() if ds.dba_column else ""
                     if dba and dba.lower() != rec.name.lower():
                         rec.attributes["legal_name"] = rec.name
@@ -295,16 +342,17 @@ class PublicDatasetSource(Source):
                             rec.owner_title = ds.owner_title_default
                     rec.attributes["dataset"] = ds.name
                     rec.attributes["dataset_role"] = "cross_check" if tag else "long_list"
+                    if ds.kind == "license" and not _has_contact(rec):
+                        skipped_bare += 1
+                        continue
                     count += 1
                     yield rec
-                    if cap is not None and count >= cap:
-                        log.warning(
-                            "public_dataset.capped", dataset=ds.key, cap=cap, reason="no city/county column"
-                        )
+                    if count >= cap:
+                        log.info("public_dataset.capped", dataset=ds.key, cap=cap)
                         break
             except Exception as exc:  # noqa: BLE001 - a broken dataset must not stop the campaign
                 log.warning("public_dataset.failed", dataset=ds.key, error=str(exc)[:300])
-            log.info("public_dataset.done", dataset=ds.key, records=count)
+            log.info("public_dataset.done", dataset=ds.key, records=count, skipped_bare=skipped_bare)
 
     # ------------------------------------------------------------------ owner lookup
     async def lookup_owner(self, business_name: str, region: str | None) -> OwnerContact | None:

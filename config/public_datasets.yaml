@@ -249,6 +249,9 @@ datasets:
     page_size: 5000
     columns:
       name: business_name
+      line1: business_address_line1
+      city_state_zip: business_city_state_zip
+      phone: business_telephone
       license_number: license_number
       license_status: license_subtype
       categories: license_type

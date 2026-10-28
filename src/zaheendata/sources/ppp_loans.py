@@ -209,6 +209,8 @@ class PppLoansSource(Source):
                 continue
             seen.add(key)
             out.append(rec)
+            if spec.limit and len(out) >= spec.limit:
+                break
         return out
 
     async def search(self, spec: SourceSearchSpec) -> AsyncIterator[RawRecord]:

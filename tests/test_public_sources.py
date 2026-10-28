@@ -32,6 +32,7 @@ from zaheendata.sources.public_datasets import (
     _person_name,
     _regex_to_like,
     load_public_datasets,
+    parse_city_state_zip,
     socrata_metadata_url,
 )
 from zaheendata.sources.sam_gov import ENTITIES_URL, SamGovSource, parse_entity
@@ -72,6 +73,12 @@ def test_public_datasets_config_loads_and_has_all_roles():
     assert any(d.long_list and d.naics_column for d in datasets)
     assert any(d.owner_lookup and d.lookup_name_column for d in datasets)
     assert any(d.tags for d in datasets)
+
+
+def test_parse_city_state_zip():
+    assert parse_city_state_zip("AUSTIN, TX 78701") == ("Austin", "TX", "78701")
+    assert parse_city_state_zip("Round Rock TX 78664-1234") == ("Round Rock", "TX", "78664")
+    assert parse_city_state_zip("") == (None, None, None)
 
 
 def test_regex_to_like_skips_regex_alternatives():
@@ -229,6 +236,9 @@ async def test_public_datasets_naics_long_list_and_licence_cross_check(tmp_path:
             json=[
                 {
                     "business_name": "ACME PLUMBING",
+                    "business_address_line1": "1 MAIN ST",
+                    "business_city_state_zip": "AUSTIN, TX 78701",
+                    "business_telephone": "5125550101",
                     "license_number": "TACLA1",
                     "license_subtype": "ACR",
                     "license_type": "A/C Contractor",
@@ -238,6 +248,11 @@ async def test_public_datasets_naics_long_list_and_licence_cross_check(tmp_path:
                     "business_name": "BARBER BOB",
                     "license_number": "B1",
                     "license_type": "Barber Shop",
+                },
+                {  # HVAC licence with no address/phone is skipped — cannot be scored
+                    "business_name": "NAME ONLY HVAC",
+                    "license_number": "TACLA2",
+                    "license_type": "A/C Contractor",
                 },
             ],
         )
@@ -263,6 +278,10 @@ async def test_public_datasets_naics_long_list_and_licence_cross_check(tmp_path:
     assert licence.source_kind == SourceKind.LICENSE and licence.license_number == "TACLA1"
     assert licence.owner_name == "Doe, Jane"  # TDLR owner_name is not flagged last-first (mixed formats)
     assert licence.attributes["dataset_role"] == "cross_check"
+    assert licence.phone == "5125550101"
+    assert licence.address is not None and licence.address.line1 == "1 MAIN ST"
+    assert licence.address.city == "Austin" and licence.address.postal_code == "78701"
+    assert all(r.source_id != "TACLA2" for r in recs)
     # datasets for other states / cities are not queried at all
     assert len(respx.calls) == 2
 

@@ -6,6 +6,7 @@ crawled and scored. Sources, in order: Nominatim (OSM), SAM.gov, Yelp, DuckDuckG
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -28,8 +29,49 @@ from .website import WebsiteFeatures
 log = get_logger(__name__)
 
 DDG_URL = "https://html.duckduckgo.com/html/"
-WEBSITE_MATCH_THRESHOLD = 55
+WEBSITE_MATCH_THRESHOLD = 50
 NOMINATIM_MATCH_THRESHOLD = 80
+# DDG's HTML endpoint returns an empty homepage (HTTP 202) for bot UAs.
+DDG_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+    "Referer": "https://html.duckduckgo.com/",
+}
+GENERIC_NAME_TOKENS = {
+    "plumbing",
+    "plumber",
+    "heating",
+    "hvac",
+    "air",
+    "conditioning",
+    "cooling",
+    "solutions",
+    "services",
+    "service",
+    "company",
+    "mechanical",
+    "contractor",
+    "contractors",
+    "group",
+    "enterprises",
+    "associates",
+    "industries",
+    "utilities",
+    "inc",
+    "llc",
+}
+PARKED_MARKERS = (
+    "buy this domain",
+    "this domain is for sale",
+    "domain parking",
+    "godaddy",
+    "sedo.com",
+    "hugedomains",
+    "related searches",
+)
 
 JUNK_HOSTS = {
     "facebook.com",
@@ -61,6 +103,20 @@ JUNK_HOSTS = {
     "crunchbase.com",
     "bloomberg.com",
     "opencorporates.com",
+    "hvacservice.io",
+    "ncwakehvac.com",
+    "cybo.com",
+    "bizapedia.com",
+    "bizarchive.com",
+    "buildzoom.com",
+    "thebluebook.com",
+    "home8.org",
+    "southernhomeservices.com",
+    "georgetownhomeservices.com",
+    "zabalist.com",
+    "hotfrog.com",
+    "brownbook.net",
+    "cylex.us.com",
 }
 
 
@@ -119,6 +175,46 @@ def pick_website(business_name: str, urls: list[str]) -> str | None:
     if ranked and ranked[0][0] >= WEBSITE_MATCH_THRESHOLD:
         return ranked[0][1]
     return None
+
+
+def distinctive_tokens(name: str) -> list[str]:
+    return [t for t in normalize_name(name).split() if t not in GENERIC_NAME_TOKENS and len(t) >= 3]
+
+
+def domain_stems(name: str) -> list[str]:
+    """Hostnames worth probing for an official site (no search engine needed)."""
+    tokens = normalize_name(name).split()
+    dist = distinctive_tokens(name)
+    compact_all = re.sub(r"[^a-z0-9]", "", "".join(tokens))
+    compact_dist = re.sub(r"[^a-z0-9]", "", "".join(dist))
+    stems: list[str] = []
+    if 4 <= len(compact_dist) <= 32:
+        stems.append(compact_dist)
+    if len(dist) >= 2:
+        stems.append("".join(dist[:2]))
+    if dist and 4 <= len(dist[0]) <= 24:
+        stems.append(dist[0])
+    if not dist and 6 <= len(compact_all) <= 32:
+        stems.append(compact_all)
+    return list(dict.fromkeys(s for s in stems if s))
+
+
+def page_looks_parked(text: str) -> bool:
+    lower = text.lower()
+    return any(marker in lower for marker in PARKED_MARKERS)
+
+
+def page_matches_business(text: str, name: str, city: str | None) -> bool:
+    lower = text.lower()
+    if page_looks_parked(lower):
+        return False
+    dist = distinctive_tokens(name)
+    city_hit = bool(city and city.lower() in lower)
+    if dist:
+        hits = sum(1 for t in dist if t in lower)
+        return hits >= min(2, len(dist)) or (hits >= 1 and city_hit)
+    tokens = normalize_name(name).split()
+    return city_hit and any(t in lower for t in tokens)
 
 
 def harvest_from_website(b: Business) -> None:
@@ -180,11 +276,24 @@ class DirectoryDiscoverer:
     async def fill(self, b: Business) -> dict[str, str]:
         """Best-effort fill. Returns a map of which fields came from which source."""
         found: dict[str, str] = {}
-        try:
-            if await self._nominatim(b):
-                found["geo"] = "nominatim"
-        except Exception as exc:  # noqa: BLE001
-            log.debug("discover.nominatim_failed", name=b.name, error=str(exc)[:200])
+        addr = b.address
+        if addr and addr.line1:
+            try:
+                if await self._nominatim(b):
+                    found["geo"] = "nominatim"
+            except Exception as exc:  # noqa: BLE001
+                log.debug("discover.nominatim_failed", name=b.name, error=str(exc)[:200])
+        if not b.website:
+            try:
+                url = await self._guess_domain(b)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("discover.guess_failed", name=b.name, error=str(exc)[:200])
+                url = None
+            if url:
+                b.website = url
+                b.domain = extract_domain(url)
+                b.attributes["website_source"] = "domain_guess"
+                found["website"] = "domain_guess"
         if not b.website:
             try:
                 url = await self._duckduckgo(b)
@@ -196,6 +305,8 @@ class DirectoryDiscoverer:
                 b.domain = extract_domain(url)
                 b.attributes["website_source"] = "duckduckgo"
                 found["website"] = "duckduckgo"
+        if found:
+            log.info("discover.filled", name=b.name, **found)
         return found
 
     async def _nominatim(self, b: Business) -> bool:
@@ -269,10 +380,32 @@ class DirectoryDiscoverer:
     async def _duckduckgo(self, b: Business) -> str | None:
         where = self._where(b)
         query = f"{b.name} {where} official website".strip()
-        resp = await self.http.get(DDG_URL, params={"q": query})
+        resp = await self.http.get(DDG_URL, params={"q": query}, headers=DDG_HEADERS)
         if resp.status_code >= 400 or not resp.text:
             return None
-        return pick_website(b.name, parse_ddg_html(resp.text))
+        urls = parse_ddg_html(resp.text)
+        return pick_website(b.name, urls)
+
+    async def _guess_domain(self, b: Business) -> str | None:
+        city = (b.address.city if b.address else None) or ""
+        for stem in domain_stems(b.name)[:4]:
+            for host in (f"{stem}.com", f"{stem}.net"):
+                url = await self._probe_host(host, b.name, city)
+                if url:
+                    return url
+        return None
+
+    async def _probe_host(self, host: str, name: str, city: str) -> str | None:
+        url = f"https://{host}"
+        try:
+            resp = await self.http.get(url, headers=DDG_HEADERS, max_bytes=80_000, use_cache=False)
+        except Exception:  # noqa: BLE001
+            return None
+        if resp.status_code >= 400 or not resp.text:
+            return None
+        if page_matches_business(resp.text[:20_000], name, city or None):
+            return str(resp.url) if resp.url else url
+        return None
 
 
 def completeness(b: Business) -> tuple[int, ...]:

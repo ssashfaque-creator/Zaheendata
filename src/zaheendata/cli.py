@@ -306,6 +306,51 @@ def campaign_create(
     _run(go())
 
 
+@campaign_app.command("test")
+def campaign_test(
+    subsector: str = typer.Argument("plumbing_hvac", help="Sub-sector key"),
+    location: str = typer.Option("Austin, TX", "--location", "-l"),
+    companies: int = typer.Option(200, "--companies", "-n", help="Long-list size to collect and enrich"),
+    output: Path = typer.Option(Path("data/test-200.xlsx"), help="Spreadsheet to write"),
+) -> None:
+    """Collect, enrich, score and export a small campaign (default 200 companies). No Google Places."""
+    sub = get_registry().get(subsector)
+    spec = CampaignSpec(
+        name=f"test {companies} {sub.name} - {location}",
+        subsector_key=subsector,
+        geography=_geo([location], None, "US", 25.0),
+        long_list_target=companies,
+        short_list_target=min(100, companies),
+        enrich=True,
+        contact_enrichment=False,
+    )
+
+    async def go() -> None:
+        db = Database()
+        await db.init()
+        http = HttpClient()
+        c = await db.create_campaign(spec)
+        console.print(f"created campaign [bold]{c.id}[/bold]: {spec.name}")
+        runner = CampaignRunner(db, http, progress=_progress)
+        result = await runner.run(c, start_stage="collect", stop_after="score")
+        items = await db.list_businesses(c.id)
+        with_site = sum(1 for b in items if b.website)
+        with_addr = sum(1 for b in items if b.address and b.address.line1)
+        with_phone = sum(1 for b in items if b.phone_e164)
+        selected = [b for b in items if b.status == BusinessStatus.SELECTED]
+        path = write_export(output, selected or items)
+        await http.aclose()
+        await db.close()
+        console.print_json(json.dumps(result.stats, default=str))
+        console.print(
+            f"state={result.state.value} businesses={len(items)} "
+            f"website={with_site} address={with_addr} phone={with_phone} "
+            f"selected={len(selected)} wrote {path}"
+        )
+
+    _run(go())
+
+
 def _progress(stage: str, data: dict[str, Any]) -> None:
     console.print(f"[cyan]{stage}[/cyan] " + " ".join(f"{k}={v}" for k, v in data.items()))
 
