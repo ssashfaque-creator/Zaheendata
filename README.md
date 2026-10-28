@@ -1,11 +1,11 @@
 # Zaheendata
 
 An enterprise business-directory extraction engine. It builds scored, owner-enriched shortlists
-of small businesses (5–19 employees) for 17 NAICS sub-sectors by combining list vendors, Google
-Maps data, public licence rolls and trade directories, then applies the four-step method from the
-sub-sector guide:
+of small businesses (5–19 employees) for 17 NAICS sub-sectors from **free government and public
+data** – SBA PPP loan records, SAM.gov, state and city business registries, licence boards, Google
+Maps and trade directories – then applies the four-step method from the sub-sector guide:
 
-1. **Build a long list (300–500)** from a data vendor filtered by NAICS, employee band and
+1. **Build a long list (300–500)** from government registries filtered by NAICS, employee band and
    geography, cross-checked against the sub-sector's own source (licence lists, Houzz, Thumbtack,
    Vagaro, ISSA, ASTRA, ...).
 2. **Remove poor fits** – franchises and chains, no website, fewer than 10 Google reviews,
@@ -18,10 +18,10 @@ Every stage is persisted, resumable, rate-limited, cached, logged and costed.
 
 ```
 sources ──▶ collect ──▶ resolve ──▶ filter ──▶ enrich ──▶ score ──▶ contacts ──▶ export
- vendors     raw rows    entity      poor-fit   website    5 signals  owner        CSV/XLSX/
- maps        per source  resolution  removal    reviews    0–10       email/phone  JSON/API
- licences                (dedupe)               tech stack
- directories
+ registries  raw rows    entity      poor-fit   maps match 5 signals  owner        CSV/XLSX/
+ licences    per source  resolution  removal    website    0–10       email/phone  JSON/API
+ maps                    (dedupe)               reviews
+ directories                                    tech stack
 ```
 
 ## Quick start
@@ -32,16 +32,19 @@ cp .env.example .env             # add the API keys you have (all optional)
 .venv/bin/zaheen demo            # full offline run on bundled fixtures, writes data/demo-shortlist.csv
 .venv/bin/zaheen subsectors      # the 17 sub-sectors, NAICS codes and best-fit signals
 .venv/bin/zaheen sources         # which connectors are configured
+.venv/bin/zaheen datasets check  # probe every government dataset in config/public_datasets.yaml
 ```
 
 Run a real campaign:
 
 ```bash
 zaheen db-init
+zaheen datasets ppp-download                                            # one-off: SBA PPP FOIA CSVs
+zaheen plan plumbing_hvac --state TX --level county                     # Census counts → scope advice
 zaheen campaign create plumbing_hvac --location "Austin, TX"            # metro scope
 zaheen campaign create pest_control --state TX                          # state-wide scope
 zaheen campaign create hobby_toy_game_stores                            # national scope
-zaheen campaign run <campaign-id> --import exports/data_axle_238220.csv # merge a vendor export
+zaheen campaign run <campaign-id> --import exports/my_registry_pull.csv # merge any CSV/XLSX export
 zaheen campaign export <campaign-id> exports/plumbing-austin.xlsx
 ```
 
@@ -76,11 +79,15 @@ compliance flags (role-account email, suppression hits).
 
 | Role | Connector | Needs |
 |---|---|---|
-| Long list (NAICS + 5–19 employees) | Data Axle API, Apollo, **CSV/XLSX import** of any vendor export (D&B, ZoomInfo, Data Axle, Apollo) | key or file |
-| Google Maps data | Google Places API (New) text search + Place Details (newest reviews) | `ZAHEEN_GOOGLE_MAPS_API_KEY` |
-| Cross-check | Yelp Fusion, OpenStreetMap Overpass, state licence rolls (Socrata/CSV, `config/license_sources.yaml`), public directories (`config/directories.yaml`) | key / none / config |
-| Enrichment | Website crawler + Wappalyzer-style fingerprints (`config/tech_fingerprints.yaml`), BuiltWith, Hunter, Apollo people | optional keys |
+| Long list (NAICS + 5–19 employees) | **SBA PPP loan data** (NAICS, `JobsReported`, franchise name, owner), **SAM.gov** entity search, **state/city business registries** on Socrata (TX, CA, WA, CT, LA, ...; `config/public_datasets.yaml`), **CSV/XLSX import** of any registry pull | free / free key / none / file |
+| Google Maps data | Google Places API (New) text search + Place Details (newest reviews); registry rows are matched to their Maps listing during enrichment | `ZAHEEN_GOOGLE_MAPS_API_KEY` |
+| Cross-check | State licence boards (TDLR, WA L&I, OR CCB, DE DPR, NYC DCWP, Chicago BACP, ...), Yelp Fusion, OpenStreetMap Overpass, public directories (`config/directories.yaml`) | none / key / config |
+| Scope planning | Census County Business Patterns establishment counts (`zaheen plan`) | `ZAHEEN_CENSUS_API_KEY` (free) |
+| Enrichment | Website crawler + Wappalyzer-style fingerprints (`config/tech_fingerprints.yaml`), owner waterfall (record → SAM.gov → Secretary of State filings → website) | none |
 | Experimental | Playwright Google Maps scraper (off by default; ToS caveats) | opt-in |
+
+No paid list vendors are involved. The only keys are free: Google Maps (pay-as-you-go with a monthly
+credit), api.data.gov for SAM.gov and api.census.gov for planning.
 
 See [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md) for every source, what it yields, cost, terms and
 the sub-sector mapping; [docs/SCORING.md](docs/SCORING.md) for the exact scoring rules;
@@ -92,10 +99,12 @@ All settings are environment variables prefixed `ZAHEEN_` (see `.env.example`). 
 live in YAML so they can be tuned without code changes:
 
 - `config/subsectors.yaml` – 17 sub-sectors: NAICS, scope, cross-check sources, search queries,
-  Yelp categories, OSM tags, Apollo keywords, best-fit rule.
+  Yelp categories, OSM tags, keyword filters, best-fit rule.
+- `config/public_datasets.yaml` – government registries and licence boards (Socrata/CSV) with
+  column mappings, NAICS matching mode and the role each plays (long list, cross-check, owner
+  lookup). Validate with `zaheen datasets check`.
 - `config/franchises.yaml` – franchise/chain brand and domain lists.
 - `config/tech_fingerprints.yaml` – technology fingerprints and categories.
-- `config/license_sources.yaml` – state licence datasets and column mappings.
 - `config/directories.yaml` – HTML directory scraper definitions.
 
 ## Development

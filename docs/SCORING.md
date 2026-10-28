@@ -38,7 +38,7 @@ Points accumulate (capped at 2):
 - +1 if the website says "call for a quote / pricing" and has no online booking and no quote form;
   or if it has no booking, quote form or contact form at all.
 
-### multi_tool — "BuiltWith or Wappalyzer shows a mix of separate tools"
+### multi_tool — "the tech stack shows a mix of separate tools"
 
 Counts distinct *business tool* categories (payments, ecommerce, booking, field_service,
 email_marketing, crm, reputation, live_chat, forms, accounting, gift_cards, financing,
@@ -55,7 +55,7 @@ call_tracking, events, live_selling, wholesale). CMS, analytics and social links
 | Points | Condition |
 |---|---|
 | 0 | no owner name |
-| 1 | owner named (vendor, Apollo, website) |
+| 1 | owner named (PPP/licence record, SAM.gov, Secretary of State filing, website) |
 | 2 | named **and** a direct channel: non-role email (not info@/contact@…), a phone different from the main line, or a personal LinkedIn profile (`/in/`) |
 
 ### subsector_signal — the extra signal per sub-sector

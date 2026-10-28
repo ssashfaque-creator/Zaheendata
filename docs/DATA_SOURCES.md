@@ -1,29 +1,76 @@
 # Data sources: what we need, where it comes from, how it is obtained
 
-The brief needs five kinds of data per business. This document maps each to concrete sources,
-the connector that implements it, how the data is obtained, what it costs and the terms that
-apply.
+The engine uses **no paid list vendor**. The role a vendor plays in the brief (a long list filtered
+by NAICS, employee band and geography, with an owner name) is covered by free government data;
+Google Maps supplies presence, website and reviews; the business's own website supplies the rest.
 
 | Need | Fields | Primary source | Cross-check / fallback |
 |---|---|---|---|
-| Long list by NAICS + 5–19 employees + area | legal name, NAICS, employee count, address, phone, website, owner name | Data Axle, D&B Hoovers, ZoomInfo, Apollo (API or export) | sub-sector source below |
-| Google Maps presence and reviews | place id, rating, review count, newest reviews, business status, categories | Google Places API (New) + Place Details | Yelp Fusion, OSM |
+| Long list by NAICS + 5–19 employees + area | legal name, NAICS, address, employee count, franchise flag, owner name | SBA PPP loan data, SAM.gov, state/city NAICS-coded registries (Socrata) | Google Places text search, Yelp, OSM |
+| Google Maps presence and reviews | place id, rating, review count, newest reviews, status, website, phone | Google Places API (New) + Place Details | Yelp Fusion, OSM |
 | Website intelligence | booking/quote intake, plans, services, gift cards, store, events, owner name, emails | our crawler | – |
-| Tool stack | payments, e-commerce, booking, email marketing, CRM, field-service software | fingerprints on crawled HTML | BuiltWith API |
-| Owner contact | name, title, email, direct phone, LinkedIn | vendor record → Apollo people → Hunter → website | LinkedIn (manual) |
+| Tool stack | payments, e-commerce, booking, email marketing, CRM, field-service software | Wappalyzer-style fingerprints on crawled HTML, scripts, headers, outbound hosts | – |
+| Owner contact | name, title, email, direct phone, LinkedIn | registry record → SAM.gov POC → Secretary of State / L&I principal → website | LinkedIn (manual) |
+| Geography sizing | establishments per county/metro/state by size class | Census County Business Patterns | – |
 
-## 1. List vendors (step 1: the long list)
+All of these are free; only Google Places is metered (tracked in the cost ledger).
 
-Vendors filter by exactly the two fields the brief relies on: NAICS code and employee band.
+## 1. Government registries (step 1: the long list)
 
-| Vendor | How we use it | Connector | Notes |
+### SBA Paycheck Protection Program FOIA data (`sba_ppp`)
+
+The single best free substitute for a list vendor. The SBA published every PPP loan (≈11.5M rows)
+with `BorrowerName`, address, `NAICSCode`, **`JobsReported`** (the only nationwide, free employee
+count), `FranchiseName`, `BusinessType`, `BusinessAgeDescription` and `NonProfit`.
+
+- Download: `zaheen datasets ppp-download` (lists and fetches the `public_*.csv` files from
+  data.sba.gov's DKAN API, ≈8 GB) or copy the CSVs into `ZAHEEN_PPP_DATA_DIR`.
+- First use builds `<ppp_data_dir>/_by_state/<ST>.csv` once (one streaming pass over every file);
+  each search then reads a single state file in a worker thread.
+- Filters: NAICS prefix, borrower state, borrower city (metro campaigns), `JobsReported` within
+  5–19, drops non-profits, dedupes first/second-draw loans by name + ZIP. `FranchiseName` becomes
+  the franchise flag that the poor-fit filter rejects on. Sole proprietors / independent
+  contractors are kept but marked `individual_structure`.
+- Caveats: a 2020–21 snapshot (businesses founded since are missing; some have closed, which the
+  Maps status check catches); covers roughly 60–70% of employer firms in the target band.
+
+### SAM.gov Entity Management API (`sam_gov`, free key from api.data.gov)
+
+Every entity registered to work with the federal government: legal and DBA name, physical
+address, website, entity structure, NAICS codes and **points of contact** (name + title;
+email/phone need a FOUO-entitled key). Small service firms (janitorial, landscaping, painting,
+electrical, HVAC, pest control) register frequently. Queried by `naicsCode` + state (+ city) for the
+long list, and by `legalBusinessName` / `dbaName` during contact enrichment (`find_owner`).
+
+### State and city NAICS-coded registries (`public_datasets`, Socrata)
+
+Configured in `config/public_datasets.yaml`; every entry was verified against the live endpoint
+and `zaheen datasets check` re-verifies ids, columns and filters before a production run.
+
+| Dataset | Covers | NAICS | Extras |
 |---|---|---|---|
-| **Data Axle** (Platform API) | `places/search` filtered by `primary_naics_code`, `location_employee_count` 5–19, state/city or geo-radius. Returns executive contacts and franchise/chain flags. | `data_axle` (`ZAHEEN_DATA_AXLE_API_KEY`) | Contract required; attribute names depend on your package (`ATTRIBUTES` in `sources/data_axle.py`). |
-| **Apollo.io** | `mixed_companies/search` with `organization_num_employees_ranges=["5,19"]`, location and industry keywords; `mixed_people/search` + `people/match` for owner emails. | `apollo` (`ZAHEEN_APOLLO_API_KEY`) | No NAICS filter: keyword tags per sub-sector in `subsectors.yaml`. `people/match` consumes credits; only run for the shortlist (stage `contacts`). |
-| **D&B Hoovers, ZoomInfo, Data Axle Genie exports** | Export CSV/XLSX from the vendor UI with NAICS + employee filter, pass with `--import`. Columns auto-map (`sources/csv_import.py: SYNONYMS`). | `csv_import` | The most common enterprise workflow: contracts often forbid API resale but allow exports. |
+| Texas Comptroller sales-tax permits | all TX outlets | numeric `outlet_naics_code` | taxpayer (permit holder) name, city/state/zip |
+| Los Angeles active businesses | LA city | `naics` | DBA + legal name |
+| San Francisco registered businesses | SF | self-reported (2-digit prefix) | `ownership_name` |
+| Seattle business licence tax certificates | Seattle | `naics_code` | phone, trade name, ownership type |
+| Berkeley business licences | Berkeley | `naics` | **employee count** |
+| East Baton Rouge businesses | EBR Parish | numeric | phone, website |
+| Connecticut business registry | all CT | "Name (code)" text | **business email**, entity type |
+| Chicago business licences | Chicago | keyword on activity | lat/lng |
 
-The vendor record is trusted for NAICS, employee count and owner name; Google is trusted for the
-consumer-facing name, rating, reviews and status (see `resolve.py: MAPS_PREFERRED / VENDOR_PREFERRED`).
+Narrowing is done server-side with SoQL: `starts_with()` / `=` / range / `like` on the NAICS
+column depending on `naics_match`, `upper(city) = ...` for metro campaigns, and – for datasets
+without a city column such as TDLR – `upper(county) like ...` using the county returned by the
+geocoder. A dataset with neither is capped so one statewide roll cannot swamp the long list.
+
+### Adding a registry
+
+Search the Socrata catalogue (`api.us.socrata.com/api/catalog/v1?q=business+license+NAICS`),
+data.gov, a state portal or a Secretary of State bulk download, copy the closest entry in
+`public_datasets.yaml`, map the columns, and run `zaheen datasets check <key>`. Bulk files that
+need a manual download (Florida DBPR licensee files, California CSLB data portal, most Secretary of
+State extracts) are merged into any campaign with `zaheen campaign run <id> --import file.csv`
+(columns auto-map).
 
 ## 2. Google Maps data
 
@@ -31,81 +78,84 @@ consumer-facing name, rating, reviews and status (see `resolve.py: MAPS_PREFERRE
 
 - **Text Search** `POST places:searchText` with `textQuery` ("plumber in Austin, TX") and a
   `locationBias` circle per search cell; 20 results per page, 3 pages, field mask limited to what
-  we store (Pro SKU: id, name, address components, location, phone, website, rating, review count,
-  status, types, hours). Price ≈ $32 per 1,000 requests (tracked in the cost ledger).
+  we store. ≈ $32 per 1,000 requests.
+- **Registry → Maps matching.** Registry rows have no website or reviews, so during the enrich
+  stage every candidate without a place id is looked up once by name + city + state and accepted
+  only when the name is a close fuzzy match (`token_set_ratio ≥ 82`) and the state agrees. The
+  website, phone, rating, review count, status and place id are attached; the website and
+  `<10 reviews` rules are applied afterwards. Cost: one text search per unmatched business
+  (≈ $13 for a 400-business long list).
 - **Place Details (legacy endpoint)** for `reviews` with `reviews_sort=newest`, `rating`,
-  `user_ratings_total`, `business_status`. The legacy endpoint is used because the New API cannot
-  sort reviews by recency, and "recent reviews" is a scoring signal. ≈ $20 per 1,000 (Atmosphere).
-  Only 5 reviews are returned per place; recency is judged from those five newest.
-- Responses are cached on disk (`ZAHEEN_HTTP_CACHE_TTL_SECONDS`, default 7 days) so re-running
-  a stage never re-bills.
-- Budget rule of thumb for one metro sub-sector: ~15 text-search pages + ~300 detail calls
-  ≈ $7. A state-wide retail sub-sector (grid of ~150 cells × 3 queries) ≈ $15–40.
+  `user_ratings_total`, `business_status`. ≈ $20 per 1,000.
+- Responses are cached on disk (`ZAHEEN_HTTP_CACHE_TTL_SECONDS`, default 7 days).
 - **Terms:** Places data may be cached for 30 days except place ids (indefinitely). Do not display
-  it on non-Google maps. Review text should be treated as transient; keep the derived signals.
+  it on non-Google maps.
+
+Without a Maps key the engine still runs (registries + website crawl), but the website and review
+rules are skipped and the campaign stats carry `website_filter_skipped` / `review_filter_skipped`
+so nobody mistakes a registry-only list for a vetted one.
 
 ### Google Maps scraper (`google_maps_scraper`, Playwright) — experimental, off by default
 
-Scrolls the Maps result feed and parses listing cards (name, rating, review count, phone,
-website, coordinates). Google's Terms of Service prohibit automated access; this connector is
-provided for organisations that have made their own legal assessment, and for budget-constrained
-research. Expect breakage when the DOM changes, CAPTCHA pressure and IP throttling. Enable with
-`ZAHEEN_ENABLE_GOOGLE_MAPS_SCRAPER=true`, `pip install 'zaheendata[browser]'`,
-`playwright install chromium`, and run it with low concurrency through a residential proxy.
+Google's Terms of Service prohibit automated access; provided only for organisations that have
+made their own legal assessment. Enable with `ZAHEEN_ENABLE_GOOGLE_MAPS_SCRAPER=true`.
 
-### Google Business Profile owner responses
-
-The "owner named on Google profile" signal in the brief (owner replies, "from the owner" posts)
-is not exposed by the Places API. It is approximated by the vendor owner record, the website owner
-extraction and Apollo. If you scrape, the owner-reply byline can be added to `owner_name_candidates`.
-
-## 3. Sub-sector cross-check sources (step 1b: catch what the vendor missed)
+## 3. Sub-sector cross-check sources (step 1b)
 
 | Sub-sector | Cross-check in the brief | How the engine gets it |
 |---|---|---|
-| Plumbing/HVAC, Electrical, Roofing, Remodelers | State contractor / electrical licence lists | `state_license`: Socrata open-data APIs (TX TDLR, NYC DCWP …) or CSV extracts (FL DBPR, CA CSLB). Configure per state in `config/license_sources.yaml` (dataset, column map, licence-type regex). Yields legal name, address, phone, licence number/status, often owner name. |
-| Pest control | State pest-control licences | Same connector (TX Dept. of Agriculture SPCS list as the example). |
-| Beauty & nail salons | State cosmetology licence lists; Vagaro, Fresha, Booksy | Licence rolls via `state_license`; booking marketplaces are detected on the *website* instead (links to vagaro/fresha/booksy = `booking_provider`), which also answers "phone-only vs online booking". |
-| Landscaping, Painting | Google Maps, Thumbtack, Angi | Places + Yelp; Thumbtack/Angi templates in `config/directories.yaml` (disabled: both use bot protection and prohibit scraping; enable only with permission). |
-| Remodelers | Houzz | Template in `directories.yaml` (same caveat). Houzz presence is also detected from website links. |
-| Janitorial | State business registrations, ISSA directory | Secretary-of-State bulk files can be loaded via `csv_import`; ISSA member directory template. |
-| Florists | SAF, FTD and Teleflora directories | SAF template; FTD/Teleflora membership is inferred from website links / domains (`wire_service_only` negative feature). |
-| Pet-supply, Gift, Sporting goods | Google Maps, Faire, NSGA | Places + Yelp + OSM; Faire presence detected from website links; NSGA locator template. |
-| Women's clothing | Instagram, Shopify store pages | Instagram link + "live sales"/"shop the gram" language on the website; Shopify detected by fingerprint. Direct Instagram scraping is not implemented (Meta ToS); use the Instagram Graph API with business authorisation if needed. |
-| Hobby/toy/game | ASTRA directory, publishers' store locators | ASTRA template; Wizards of the Coast / Games Workshop store locators are JSON endpoints that fit the `directory` connector with small adapters. |
+| Plumbing/HVAC, Electrical, Roofing, Remodelers, Painting | State contractor / electrical licence lists | `public_datasets` tags `state_contractor_license`, `state_electrical_license`: Texas TDLR (A/C and electrical contractors, narrowed by county), Washington L&I registered contractors (specialty, phone, principal), Oregon BCD (plumbing/electrical/HVAC contractors), Delaware DPR (master plumbers/electricians/HVACR), NYC DCWP home-improvement contractors. |
+| Pest control | State pest-control licences | Tag `state_pest_control_license`; no verified open-data roll yet – import the state file with `--import`. SBA PPP covers NAICS 561710 directly. |
+| Beauty & nail salons | State cosmetology licence lists; Vagaro, Fresha, Booksy | TDLR salon licences, Delaware cosmetology establishments; booking marketplaces are detected on the website (`booking_provider`). |
+| Landscaping, Painting | Google Maps, Thumbtack, Angi | Places + Yelp; Thumbtack/Angi templates in `config/directories.yaml` (disabled: bot protection / ToS). |
+| Janitorial | State business registrations, ISSA directory | SAM.gov (janitorial firms register heavily), CT/TX registries, ISSA member directory template. |
+| Florists | SAF, FTD and Teleflora directories | SAF template; FTD/Teleflora inferred from website links (`wire_service_only`). |
+| Pet-supply, Gift, Sporting goods | Google Maps, Faire, NSGA | Places + Yelp + OSM + PPP; Faire detected from website links; NSGA locator template. |
+| Women's clothing | Instagram, Shopify store pages | Instagram link + live-sale language on the website; Shopify by fingerprint. |
+| Hobby/toy/game | ASTRA directory, publishers' store locators | ASTRA template; publisher store locators fit the `directory` connector. |
 
-**Yelp Fusion** (`yelp`, free tier 500 calls/day): category-filtered search within 40 km,
-50 per page; gives a second review count and categories to corroborate Google.
+**Yelp Fusion** (`yelp`, free tier): category-filtered search, second review count.
+**OpenStreetMap / Overpass** (`osm_overpass`, free, ODbL): craft/shop tags; `brand` tags flag chains.
 
-**OpenStreetMap / Overpass** (`osm_overpass`, free, ODbL): craft/shop tags around each cell;
-sparse but catches independents and carries `brand` tags that flag chains. Attribute OSM in any
-public output.
+## 4. Geography sizing: Census County Business Patterns (`zaheen plan`)
 
-## 4. Website intelligence and tool stack
+`GET api.census.gov/data/2022/cbp` with `NAICS2017=<code>`, `EMPSZES=001,220,230` (all / 5–9 /
+10–19 employees) by county, state or metro. `zaheen plan florists --state TX` and `GET /plan/
+florists?state=TX` rank geographies by 5–19 employee establishments and recommend `local`,
+`local_tight`, `state` or `national` scope before any crawl budget is spent. Requires the free key
+(`ZAHEEN_CENSUS_API_KEY`).
 
-`enrich/website.py` fetches the homepage plus up to `ZAHEEN_WEBSITE_MAX_PAGES` internal pages whose
-path or anchor mentions contact/about/services/book/shop/events/team/etc., honouring robots.txt
-and per-host rate limits, then applies regex rule tables to produce `WebsiteFeatures`.
-`enrich/techstack.py` matches Wappalyzer-style fingerprints (`config/tech_fingerprints.yaml`) on
-HTML, script URLs, headers and outbound link hosts. **BuiltWith** (`ZAHEEN_BUILTWITH_API_KEY`)
-can be layered on top for deeper detection; Wappalyzer's own API is a drop-in alternative.
+## 5. Website intelligence and tool stack
 
-## 5. Owner contacts (step 4)
+`enrich/website.py` fetches the homepage plus up to `ZAHEEN_WEBSITE_MAX_PAGES` internal pages,
+honouring robots.txt and per-host rate limits, and applies regex rule tables to produce
+`WebsiteFeatures`. `enrich/techstack.py` matches Wappalyzer-style fingerprints
+(`config/tech_fingerprints.yaml`) on HTML, script URLs, headers and outbound link hosts – no paid
+technology-lookup API is used.
 
-Order of precedence in `enrich/owner.py`: vendor record → Apollo people search (titles owner,
-founder, president, CEO …) with `people/match` reveal → Hunter domain search → website owner
-extraction (schema.org `founder`, "Owner: Jane Doe", "owned and operated by …") plus the least
-generic site email. LinkedIn has no public API for this; the export includes LinkedIn URLs when a
-vendor/Apollo supplies them, and a company LinkedIn link when the site shows one, for manual lookup.
+## 6. Owner contacts (step 4) — free waterfall
+
+`enrich/owner.py`, shortlist only:
+
+1. **Owner already on a record**: licence holder (TDLR `owner_name`), SF `ownership_name`, Texas
+   permit holder, Seattle/Berkeley owner fields, SAM.gov POC collected during the long list,
+   Washington L&I `primaryprincipalname`.
+2. **SAM.gov lookup** by legal/DBA name → POC name and title (email/phone with a FOUO key).
+3. **Officer / principal registries** (`owner_lookup` datasets): New York DOS chairman name,
+   Colorado SoS registered agent, Washington L&I principals; fuzzy name match ≥ 88 within the
+   business's state. "Last, First" names are normalised.
+4. **Website**: owner byline ("Owner: Jane Doe", schema.org founder), the least generic mailbox
+   (role accounts such as info@ are flagged), a personal LinkedIn profile link; the business
+   phone is the fallback phone.
+
+Each contact carries `source` and `confidence` so the export can be filtered.
 
 ## Legal and operational checklist
 
 - Google Places: use the API, keep within caching terms, keep place ids as the stable key.
-- Vendors: check whether your contract permits API use vs. exports; keep provenance per record
-  (`Business.provenance`) so vendor data can be purged on contract end.
-- Scrapers: only on public, non-login pages; robots.txt is enforced; identify the bot (`ZAHEEN_USER_AGENT`);
-  1 req/s per host by default. Marketplaces with bot protection are disabled by default.
-- Outreach: CAN-SPAM (commercial email: accurate headers, physical address, working opt-out),
-  TCPA (no autodialed/prerecorded calls or SMS to mobiles without prior express consent; scrub the
-  National DNC and state lists), and state privacy laws (CCPA applies to B2B contact data in CA).
-  Maintain the suppression list (`zaheen suppress`); exports flag suppressed rows.
+- Government data: public domain / open licence; keep `Business.provenance` so every field can be
+  traced to its registry. SBA PPP and SAM.gov data must not be used to make credit decisions.
+- Scrapers: only public, non-login pages; robots.txt enforced; identified bot; 1 req/s per host.
+- Outreach: CAN-SPAM (accurate headers, physical address, working opt-out), TCPA (no autodialed
+  or prerecorded calls/SMS to mobiles without consent; scrub National DNC and state lists), state
+  privacy laws. Maintain the suppression list (`zaheen suppress`); exports flag suppressed rows.

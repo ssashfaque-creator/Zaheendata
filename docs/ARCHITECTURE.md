@@ -7,9 +7,10 @@
    GeoPlanner            Sources              resolve.py     filters.py   enrich/*      scoring.py   export.py
    (geo.py)        (sources/registry.py)      union-find     franchise    crawler       5 signals    CSV/XLSX/JSON
    metro / state     google_places, yelp,     phone/domain/  website      fingerprints  rank/top-N   compliance
-   national grids    osm, apollo, data_axle,  place-id +     reviews      reviews       evidence     flags
-                     state_license, directory fuzzy name     area         owner
-                     csv_import, scraper
+   national grids    osm, sba_ppp, sam_gov,   place-id +     reviews      maps match   evidence     flags
+   county lookup     public_datasets,         fuzzy name     area         reviews
+                     directory, csv_import,                               owner
+                     scraper
                               │
                         HttpClient (http.py): per-host token bucket + semaphores, retries w/ Retry-After,
                         SQLite response cache (TTL), robots.txt, cost ledger
@@ -27,16 +28,20 @@
 | `settings.py` | Typed configuration (`ZAHEEN_*` env / `.env`), thresholds from the brief, feature flags, keys. |
 | `models.py` | Pydantic domain: `RawRecord` (one observation from one source), `Business` (resolved entity with enrichment, score, provenance), `CampaignSpec`/`Campaign`, `GeographySpec`, `SourceSearchSpec`. |
 | `registry.py` + `config/subsectors.yaml` | The 17 sub-sectors with NAICS, scope, cross-check sources, queries and fit-signal rules. |
-| `geo.py` | State bounding boxes, grid generation for state/national sweeps, geocoding (Google or Nominatim), area membership. |
+| `geo.py` | State bounding boxes, grid generation for state/national sweeps, geocoding (Google or Nominatim) including the county so registries can be narrowed, area membership. |
+| `census.py` | Census County Business Patterns client and `assess_scope` (local / state / national advice behind `zaheen plan`). |
 | `http.py` | Polite HTTP: concurrency limits, token buckets, retry/back-off, on-disk cache, robots.txt, `CostLedger`. |
-| `sources/` | Connector interface (`Source.search(spec) -> AsyncIterator[RawRecord]`) and implementations. Sources declare `tags` that match `cross_check` entries so each campaign automatically uses the sources the brief recommends; `always_on` sources (Places, vendors, OSM) run for every sub-sector when configured. |
+| `sources/` | Connector interface (`Source.search(spec) -> AsyncIterator[RawRecord]`) and implementations. Sources declare `tags` that match `cross_check` entries so each campaign automatically uses the sources the brief recommends; `always_on` sources (Places, PPP, SAM.gov, registries, OSM) run for every sub-sector when configured. |
+| `sources/ppp_loans.py` | SBA PPP FOIA CSVs: builds a per-state index once, then filters by NAICS prefix, `JobsReported` in the employee band, city and non-profit status. |
+| `sources/sam_gov.py` | SAM.gov Entity Management API: NAICS + state entity search and owner/POC lookup. |
+| `sources/public_datasets.py` | Generic Socrata/CSV connector driven by `config/public_datasets.yaml`: NAICS registries for the long list, licence boards for cross-checks, Secretary of State filings for owner lookup. |
 | `normalize.py` | E.164 phones, canonical URLs/domains, legal-suffix-free names, US address completion. |
 | `resolve.py` | Entity resolution: blocking on phone / domain / place id, fuzzy name matching within ZIP/city/geo blocks, union-find clustering, trust-based field merge with provenance. |
 | `filters.py` | Poor-fit rules and `FranchiseDetector` (brand lists + structural signals across the candidate set). |
 | `enrich/website.py` | Bounded crawler + regex feature extraction (`WebsiteFeatures`). |
-| `enrich/techstack.py` | Fingerprint detection + BuiltWith client. |
+| `enrich/techstack.py` | Technology fingerprint detection from crawled pages (no paid tech-stack API). |
 | `enrich/reviews.py` | Recency + admin-pain classification (pluggable classifier). |
-| `enrich/owner.py` | Owner contact waterfall (vendor → Apollo → Hunter → website). |
+| `enrich/owner.py` | Owner contact waterfall (record → SAM.gov → state registry → website); pluggable lookups. |
 | `scoring.py` | Five signals, feature resolver for YAML rules, ranking and top-N selection. |
 | `compliance.py` | Suppression evaluation, role-account / free-mail flags, channel notes. |
 | `export.py` | Flat row schema and CSV/XLSX/JSON writers. |
@@ -47,14 +52,22 @@
 
 ## Pipeline semantics
 
-- **collect** fans out `sources × cells`. Maps-type sources run per geographic cell; vendors,
-  imports and licence rolls run once per region. Raw records are flushed to `raw_records` in
-  batches; collection stops expanding once unique keys exceed 1.6 × long-list target. One failing
-  source is logged in `stats.source_errors` and never aborts the run.
+- **collect** fans out `sources × cells`. Maps-type sources run per geographic cell; registries,
+  imports and licence rolls run once per region (narrowed by city or geocoded county where the
+  dataset has such a column). Raw records are flushed to `raw_records` in batches; collection
+  stops expanding once unique keys exceed 1.6 × long-list target. One failing source is logged in
+  `stats.source_errors` and never aborts the run.
 - **resolve** rebuilds `businesses` from all raw records (idempotent).
-- **filter / enrich / score / contacts** update businesses in place; status moves
-  `candidate → rejected | scored | selected`. Contact enrichment (the paid part) runs only for the
-  selected shortlist, then re-ranks within it.
+- **filter** applies the poor-fit rules. Registry rows carry no website or review count, so when
+  Google Places is configured those two rules are *deferred* (`stats.maps_match_pending`) and
+  re-evaluated after enrichment; without a Maps source they are skipped and the business is
+  flagged (`website_filter_skipped`, `review_filter_skipped`) instead of silently rejected.
+- **enrich** first matches registry-only businesses to their Google Maps listing
+  (`GooglePlacesSource.match_business`, fuzzy name ≥ 82 within the same state), merges the listing
+  via `resolve.attach_record`, then crawls the website and classifies reviews.
+- **score / contacts** update businesses in place; status moves
+  `candidate → rejected | scored | selected`. Owner lookup runs only for the selected shortlist,
+  then re-ranks within it.
 - Every stage writes `campaign.stage` and `campaign.stats`, so `run(start_stage=...)` resumes
   after a crash or after changing thresholds without re-collecting (and re-paying).
 
@@ -77,6 +90,8 @@
 
 ## Extending
 
+- **New government dataset:** add an entry to `config/public_datasets.yaml` (resource URL, column
+  mappings, `naics_match` mode, tags) and run `zaheen datasets check`; no code needed.
 - **New source:** subclass `Source`, set `name`, `kind`, `tags`, `trust`, implement `search`, add to
   `SOURCE_CLASSES`. Tag names link it to `cross_check` lists in `subsectors.yaml`.
 - **New sub-sector:** add an entry to `subsectors.yaml`; if its signal needs a new website feature,
