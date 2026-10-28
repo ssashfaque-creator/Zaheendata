@@ -1,0 +1,95 @@
+# Generic HTML directory scraper definitions (public member directories and marketplaces).
+#
+# Each directory is a list page with repeated items. ``list_url`` may use {query}, {city},
+# {state}, {state_name}, {zip}, {page}. ``item`` is a CSS selector for one result card; the other
+# selectors are evaluated relative to the card. ``attr`` reads an attribute instead of text.
+# Pages are fetched through the polite HTTP client (robots.txt, per-host rate limits).
+#
+# IMPORTANT: Thumbtack, Houzz, Angi, Yelp web, Vagaro, Fresha, Booksy and Faire use bot
+# protection and/or prohibit scraping in their terms. Treat these definitions as templates to be
+# enabled only where you have permission or an API/partner agreement; prefer the official APIs
+# and the trade-association member directories (ISSA, NSGA, ASTRA, SAF) which are public lists.
+
+directories:
+  - key: issa_directory
+    name: ISSA member directory (cleaning industry)
+    tags: [issa_directory]
+    enabled: false
+    list_url: "https://www.issa.com/membership/member-directory?search={query}&state={state}&page={page}"
+    max_pages: 10
+    item: ".member-card"
+    fields:
+      name: { selector: ".member-name" }
+      phone: { selector: ".member-phone" }
+      website: { selector: "a.member-website", attr: href }
+      city: { selector: ".member-city" }
+      region: { selector: ".member-state" }
+      url: { selector: "a.member-name", attr: href }
+
+  - key: nsga_directory
+    name: NSGA retailer locator
+    tags: [nsga_directory]
+    enabled: false
+    list_url: "https://www.nsga.org/retailer-locator/?state={state}&page={page}"
+    max_pages: 5
+    item: ".retailer"
+    fields:
+      name: { selector: "h3" }
+      phone: { selector: ".phone" }
+      website: { selector: "a[href^='http']", attr: href }
+      line1: { selector: ".address" }
+      city: { selector: ".city" }
+      region: { selector: ".state" }
+
+  - key: astra_directory
+    name: ASTRA toy-store locator
+    tags: [astra_directory]
+    enabled: false
+    list_url: "https://www.astratoy.org/store-locator?state={state}&page={page}"
+    max_pages: 5
+    item: ".store"
+    fields:
+      name: { selector: ".store-name" }
+      phone: { selector: ".store-phone" }
+      website: { selector: ".store-website a", attr: href }
+      line1: { selector: ".store-address" }
+      city: { selector: ".store-city" }
+      region: { selector: ".store-state" }
+
+  - key: saf_directory
+    name: Society of American Florists member search
+    tags: [saf_directory]
+    enabled: false
+    list_url: "https://safnow.org/member-directory/?state={state}&page={page}"
+    max_pages: 5
+    item: ".directory-listing"
+    fields:
+      name: { selector: ".listing-title" }
+      phone: { selector: ".listing-phone" }
+      website: { selector: ".listing-website a", attr: href }
+      city: { selector: ".listing-city" }
+      region: { selector: ".listing-state" }
+
+  - key: thumbtack
+    name: Thumbtack pros (template; requires permission)
+    tags: [thumbtack]
+    enabled: false
+    list_url: "https://www.thumbtack.com/{state}/{city}/{query}/?page={page}"
+    max_pages: 3
+    item: "[data-test='pro-list-result']"
+    fields:
+      name: { selector: "h3" }
+      url: { selector: "a", attr: href }
+      review_count: { selector: "[data-test='review-count']" }
+
+  - key: houzz
+    name: Houzz professionals (template; requires permission)
+    tags: [houzz]
+    enabled: false
+    list_url: "https://www.houzz.com/professionals/{query}/c/{city}--{state}?p={page}"
+    max_pages: 3
+    item: ".hz-pro-search-result"
+    fields:
+      name: { selector: ".hz-pro-search-result__info a" }
+      url: { selector: ".hz-pro-search-result__info a", attr: href }
+      review_count: { selector: ".hz-star-rate__review-string" }

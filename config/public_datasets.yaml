@@ -1,0 +1,384 @@
+# Public / government datasets used instead of paid list vendors.
+#
+# Three roles, chosen per dataset:
+#   long_list     - the dataset can seed the long list for a campaign. Needs either a NAICS column
+#                   (filtered server-side by the sub-sector's NAICS) or a keyword filter on an
+#                   industry / licence-type column.
+#   cross_check   - matched to a sub-sector through ``tags`` (same keys as cross_check in
+#                   subsectors.yaml), e.g. state contractor licence rolls.
+#   owner_lookup  - the dataset carries officer / principal / registered-agent names and is queried
+#                   by business name during contact enrichment (Secretary of State, L&I principals).
+#
+# ``type`` is ``socrata`` (SODA JSON API, server-side $where) or ``csv`` (bulk download URL).
+# ``naics_match`` says how the NAICS column is stored:
+#   prefix   (default) text column holding the code, e.g. "238220" or "2399"  -> starts_with()
+#   number   numeric column                                                   -> = / range
+#   contains text such as "Plumbing Contractors (238220)" or "238220 - Desc"  -> like '%(code)%'
+# ``state_column`` / ``city_column`` / ``county_column`` are used to narrow a search server-side.
+# ``columns`` maps our fields (name, phone, website, line1, city, region, postal_code, naics,
+# employee_count, license_number, license_status, owner_name, owner_first, owner_last, owner_title,
+# owner_email, categories, lat, lng) to dataset columns. ``dba_column`` overrides ``name`` when the
+# row has a trade name. ``{state}`` / ``{city}`` are substituted into ``filters``.
+#
+# Every entry below was verified against the live endpoint when it was added, but dataset ids and
+# column names drift: run ``zaheen datasets check`` before a production run. To add more, search
+# the Socrata catalogue (api.us.socrata.com/api/catalog/v1?q=business+license+NAICS), data.gov,
+# state open-data portals, Secretary of State bulk downloads and licensing boards, then copy the
+# closest entry. Bulk files that need a manual download (FL DBPR licensee files, CA CSLB data
+# portal) are merged with ``zaheen campaign run <id> --import file.csv`` instead.
+
+datasets:
+  # ------------------------------------------------------------------ NAICS-coded registries (long list)
+  - key: tx_sales_tax_permits
+    name: Texas Comptroller - active sales tax permit holders (NAICS per outlet)
+    kind: tax_registry
+    type: socrata
+    states: [TX]
+    long_list: true
+    url: https://data.texas.gov/resource/jrea-zgmq.json
+    naics_column: outlet_naics_code
+    naics_match: number
+    state_column: outlet_state
+    city_column: outlet_city
+    page_size: 5000
+    columns:
+      name: outlet_name
+      line1: outlet_address
+      city: outlet_city
+      region: outlet_state
+      postal_code: outlet_zip_code
+      naics: outlet_naics_code
+      owner_name: taxpayer_name      # the permit holder; the proprietor for sole props / small LLCs
+      categories: taxpayer_organization_type
+
+  - key: la_active_businesses
+    name: City of Los Angeles - listing of active businesses (NAICS)
+    kind: business_license
+    type: socrata
+    states: [CA]
+    cities: [Los Angeles]
+    long_list: true
+    url: https://data.lacity.org/resource/6rrh-rzua.json
+    naics_column: naics
+    city_column: city
+    filters: "location_end_date IS NULL"
+    page_size: 5000
+    dba_column: dba_name
+    columns:
+      name: business_name
+      line1: street_address
+      city: city
+      postal_code: zip_code
+      naics: naics
+      categories: primary_naics_description
+
+  - key: sf_registered_businesses
+    name: City of San Francisco - registered business locations (self-reported NAICS, ownership name)
+    kind: business_license
+    type: socrata
+    states: [CA]
+    cities: [San Francisco]
+    long_list: true
+    url: https://data.sf.gov/resource/g8m3-pdis.json
+    naics_column: self_reported_naics_code   # mixed 4-digit ranges ("2399") and 6-digit codes
+    naics_prefix_length: 2
+    city_column: city
+    filters: "location_end_date IS NULL"
+    page_size: 5000
+    columns:
+      name: dba_name
+      line1: full_business_address
+      city: city
+      region: state
+      postal_code: business_zip
+      naics: self_reported_naics_code
+      owner_name: ownership_name
+      categories: lic_code_description
+
+  - key: seattle_business_licenses
+    name: City of Seattle - active business licence tax certificates (NAICS, phone)
+    kind: business_license
+    type: socrata
+    states: [WA]
+    long_list: true
+    url: https://cos-data.seattle.gov/resource/wnbq-64tb.json
+    naics_column: naics_code
+    state_column: state
+    city_column: city
+    page_size: 5000
+    dba_column: trade_name
+    columns:
+      name: business_legal_name
+      phone: business_phone
+      line1: street_address
+      city: city
+      region: state
+      postal_code: zip
+      naics: naics_code
+      categories: ownership_type
+
+  - key: berkeley_business_licenses
+    name: City of Berkeley - business licences (NAICS, employee count)
+    kind: business_license
+    type: socrata
+    states: [CA]
+    cities: [Berkeley]
+    long_list: true
+    url: https://data.cityofberkeley.info/resource/rwnf-bu3w.json
+    naics_column: naics              # "238210 - Electrical Contractors ..."
+    city_column: b1_city
+    page_size: 5000
+    dba_column: dba
+    columns:
+      name: b1_business_name
+      line1: b1_address1
+      city: b1_city
+      region: b1_state
+      postal_code: b1_zip
+      naics: naics
+      employee_count: employee_num
+      categories: busdesc
+
+  - key: baton_rouge_businesses
+    name: East Baton Rouge Parish - businesses (NAICS, phone, website)
+    kind: business_license
+    type: socrata
+    states: [LA]
+    long_list: true
+    url: https://data.brla.gov/resource/nx5f-3fxd.json
+    naics_column: business_naics_code
+    naics_match: number
+    city_column: city
+    page_size: 5000
+    columns:
+      name: business_name
+      phone: phone_number
+      website: website
+      line1: full_address
+      city: city
+      postal_code: zip
+      naics: business_naics_code
+
+  - key: ct_business_registry
+    name: Connecticut Secretary of the State - business registry (NAICS, business email)
+    kind: registry
+    type: socrata
+    states: [CT]
+    long_list: true
+    url: https://data.ct.gov/resource/n7gp-d28j.json
+    naics_column: naics_code         # "Limousine Service (485320)"
+    naics_match: contains
+    city_column: billingcity
+    filters: "status = 'Active'"
+    page_size: 5000
+    columns:
+      name: name
+      line1: billingstreet
+      city: billingcity
+      region: billingstate
+      postal_code: billingpostalcode
+      naics: naics_code
+      owner_email: business_email_address   # registered contact mailbox; usually the owner's for 5-19 staff firms
+      categories: business_type
+
+  # ------------------------------------------------------------------ city licences, keyword filtered
+  - key: nyc_dcwp_licenses
+    name: NYC DCWP - business licences (home improvement contractors via category keyword)
+    kind: business_license
+    type: socrata
+    states: [NY]
+    cities: [New York]
+    tags: [state_contractor_license]
+    url: https://data.cityofnewyork.us/resource/w7w3-xahh.json
+    filters: "license_status = 'Active'"
+    keyword_column: business_category
+    keyword_filter_by_tag:
+      state_contractor_license: "Home Improvement"
+    page_size: 5000
+    columns:
+      name: business_name
+      phone: contact_phone
+      line1: address_building
+      city: address_city
+      region: address_state
+      postal_code: address_zip
+      license_number: license_nbr
+      license_status: license_status
+      categories: business_category
+      lat: latitude
+      lng: longitude
+
+  - key: chicago_business_licenses
+    name: City of Chicago - business licences (keyword on business activity)
+    kind: business_license
+    type: socrata
+    states: [IL]
+    cities: [Chicago]
+    long_list: true
+    url: https://data.cityofchicago.org/resource/r5kz-chrr.json
+    filters: "license_status = 'AAI' AND city = 'CHICAGO'"
+    keyword_column: business_activity
+    keyword_filter_by_query: true    # sub-sector keywords + search queries become the regex
+    page_size: 5000
+    columns:
+      name: doing_business_as_name
+      line1: address
+      city: city
+      region: state
+      postal_code: zip_code
+      license_number: license_number
+      license_status: license_status
+      categories: business_activity
+      lat: latitude
+      lng: longitude
+
+  # ------------------------------------------------------------------ licence boards (cross-check)
+  - key: tx_tdlr_licenses
+    name: Texas TDLR - licences (A/C contractors, electrical contractors, salons)
+    kind: license
+    type: socrata
+    states: [TX]
+    tags: [state_electrical_license, state_contractor_license, state_cosmetology_license]
+    url: https://data.texas.gov/resource/7358-krk7.json
+    county_column: business_county   # no city column; metro campaigns narrow by geocoded county
+    keyword_column: license_type
+    keyword_filter_by_tag:
+      state_electrical_license: "electrical contractor"
+      state_contractor_license: "a/c contractor"
+      state_cosmetology_license: "salon"
+    page_size: 5000
+    columns:
+      name: business_name
+      line1: business_address_line1
+      city_state_zip: business_city_state_zip
+      phone: business_telephone
+      license_number: license_number
+      license_status: license_subtype
+      categories: license_type
+      owner_name: owner_name
+
+  - key: wa_li_contractors
+    name: Washington L&I - registered contractors (specialty, phone, principal)
+    kind: license
+    type: socrata
+    states: [WA]
+    tags: [state_contractor_license]
+    url: https://data.wa.gov/resource/m8qx-ubtq.json
+    filters: "contractorlicensestatus = 'ACTIVE'"
+    keyword_column: specialtycode1desc
+    keyword_filter_by_query: true    # PLUMBING / HVAC / ROOFING / PAINTING / LANDSCAPING ...
+    owner_title_default: Principal (L&I registration)
+    owner_name_last_first: true
+    page_size: 5000
+    columns:
+      name: businessname
+      phone: phonenumber
+      line1: address1
+      city: city
+      region: state
+      postal_code: zip
+      license_number: contractorlicensenumber
+      license_status: contractorlicensestatus
+      categories: specialtycode1desc
+      owner_name: primaryprincipalname
+
+  - key: or_bcd_licenses
+    name: Oregon Building Codes Division - active plumbing / electrical / HVAC contractor licences
+    kind: license
+    type: socrata
+    states: [OR]
+    tags: [state_contractor_license, state_electrical_license]
+    url: https://data.oregon.gov/resource/vhbr-cuaq.json
+    filters: "lic_status = 'Active' AND upper(lictype) like '%CONTRACTOR%'"
+    keyword_column: lictype
+    keyword_filter_by_tag:
+      state_contractor_license: "plumbing contractor|hvac"
+      state_electrical_license: "electrical contractor"
+    page_size: 5000
+    dba_column: dba
+    columns:
+      name: full_name
+      line1: addr1
+      city: city
+      region: state
+      postal_code: zipcode
+      license_number: licnbr
+      license_status: lic_status
+      categories: lictype
+
+  - key: de_professional_licenses
+    name: Delaware Division of Professional Regulation - licences (salons, master plumbers / electricians / HVACR)
+    kind: license
+    type: socrata
+    states: [DE]
+    tags: [state_cosmetology_license, state_contractor_license, state_electrical_license]
+    url: https://data.delaware.gov/resource/pjnv-eaih.json
+    filters: "license_status = 'Active'"
+    keyword_column: license_type
+    keyword_filter_by_tag:
+      state_cosmetology_license: "cosmetology/barbering establishment|mobile salon"
+      state_contractor_license: "master plumber|master hvacr"
+      state_electrical_license: "master electrician"
+    page_size: 5000
+    columns:
+      name: combined_name
+      city: city
+      region: state
+      postal_code: zip_code
+      license_number: license_no
+      license_status: license_status
+      categories: license_type
+
+  # ------------------------------------------------------------------ officer / principal registries (owner lookup)
+  - key: ny_dos_corporations
+    name: New York Department of State - active corporations (chairman / principal name)
+    kind: registry
+    type: socrata
+    states: [NY]
+    owner_lookup: true
+    owner_title_default: Chairman (NY DOS filing)
+    url: https://data.ny.gov/resource/n9v6-gdp6.json
+    lookup_name_column: current_entity_name
+    columns:
+      name: current_entity_name
+      line1: dos_process_address_1
+      city: dos_process_city
+      region: dos_process_state
+      postal_code: dos_process_zip
+      owner_name: chairman_name
+
+  - key: co_business_entities
+    name: Colorado Secretary of State - business entities in good standing (registered agent)
+    kind: registry
+    type: socrata
+    states: [CO]
+    owner_lookup: true
+    owner_title_default: Registered agent
+    url: https://data.colorado.gov/resource/4ykn-tg5h.json
+    lookup_name_column: entityname
+    filters: "entitystatus = 'Good Standing'"
+    columns:
+      name: entityname
+      line1: principaladdress1
+      city: principalcity
+      region: principalstate
+      postal_code: principalzipcode
+      owner_first: agentfirstname
+      owner_last: agentlastname
+
+  - key: wa_li_principals
+    name: Washington L&I - contractor licence principals
+    kind: registry
+    type: socrata
+    states: [WA]
+    owner_lookup: true
+    owner_title_default: Principal (L&I registration)
+    owner_name_last_first: true
+    url: https://data.wa.gov/resource/4xk5-x9j6.json
+    lookup_name_column: businessname
+    filters: "enddate IS NULL"
+    columns:
+      name: businessname
+      license_number: contractorlicensenumber
+      owner_name: principalname
+      categories: businesstypecodedesc
