@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     http_max_retries: int = 4
     discover_timeout_seconds: float = Field(
         default=8.0,
-        description="Timeout for Census, Photon, DuckDuckGo and OSM lookups. Fail fast on a dead host.",
+        description="Timeout for Census, ArcGIS, search engines and OSM lookups. Fail fast on a dead host.",
     )
     discover_retries: int = Field(
         default=1, ge=1, description="Attempts per discovery request (no long backoff)."

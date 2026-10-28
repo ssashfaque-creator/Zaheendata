@@ -1,4 +1,4 @@
-"""Free website / address discovery (DuckDuckGo + Nominatim) and harvest from crawled pages."""
+"""Free website / address discovery (Census, Overpass, ArcGIS, Bing) and harvest from crawled pages."""
 
 from __future__ import annotations
 
@@ -12,8 +12,12 @@ from zaheendata.enrich.discover import (
     census_point,
     completeness,
     harvest_from_website,
+    overpass_name_needle,
+    parse_arcgis_candidates,
     parse_bing_html,
+    parse_bing_results,
     parse_census_batch,
+    parse_crtsh,
     parse_ddg_api,
     parse_ddg_html,
     photon_pick,
@@ -66,6 +70,57 @@ def test_photon_pick_requires_name_and_city_match():
     assert photon_pick("Airco Mechanical", "Austin", "TX", [airport, airco])["properties"]["city"] == "Austin"
     assert photon_pick("Airco Mechanical", "Austin", "TX", [other_city]) is None
     assert photon_pick("Airco Mechanical", "Austin", "TX", [airport]) is None
+
+
+def test_parse_crtsh_extracts_owned_domains():
+    urls = parse_crtsh(
+        [
+            {
+                "common_name": "www.1stcallplumbing.com",
+                "name_value": "1stcallplumbing.com\nwww.1stcallplumbing.com",
+            },
+            {"common_name": "*.cloudflare.com", "name_value": "cloudflare.com"},
+        ]
+    )
+    assert any("1stcallplumbing.com" in u for u in urls)
+
+
+def test_parse_bing_results_reads_phone_next_to_url():
+    html = (
+        '<ol id="b_results"><li class="b_algo"><h2>'
+        '<a href="https://www.1stcallplumbing.com/">1st Call</a></h2>'
+        "<p>(512) 555-0199 plumbing in Austin</p></li></ol>"
+    )
+    rows = parse_bing_results(html)
+    assert rows and "1stcallplumbing.com" in rows[0][0]
+    assert rows[0][1] == "+15125550199"
+
+
+def test_parse_arcgis_candidates_and_overpass_needle():
+    feats = parse_arcgis_candidates(
+        {
+            "candidates": [
+                {
+                    "address": "Airco Mechanical",
+                    "score": 98.7,
+                    "location": {"x": -97.74, "y": 30.27},
+                    "attributes": {
+                        "PlaceName": "Airco Mechanical",
+                        "City": "Austin",
+                        "RegionAbbr": "TX",
+                        "StAddr": "100 Main St",
+                        "AddNum": "100",
+                        "Postal": "78701",
+                        "Phone": "512-555-0199",
+                        "URL": "https://www.airco.com",
+                    },
+                }
+            ]
+        }
+    )
+    assert feats and feats[0]["properties"]["name"] == "Airco Mechanical"
+    assert feats[0]["properties"]["website"] == "https://www.airco.com"
+    assert overpass_name_needle("AIRCO MECHANICAL LLC") == "AIRCO MECHANICAL"
 
 
 def test_parse_ddg_api_and_bing_html():
@@ -123,34 +178,36 @@ def test_completeness_ranks_crawled_sites_first():
     assert completeness(rich) > completeness(empty)
 
 
-def _empty_photon() -> httpx.Response:
-    return httpx.Response(200, json={"features": []})
-
-
-def _empty_ddg(_request: httpx.Request) -> httpx.Response:
+def _empty_html(_request: httpx.Request) -> httpx.Response:
     return httpx.Response(200, text="<html></html>")
 
 
+def _empty_arcgis(_request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, json={"candidates": []})
+
+
 @respx.mock
-async def test_discoverer_uses_photon_without_nominatim(tmp_path: Path):
+async def test_discoverer_uses_arcgis_poi_not_photon(tmp_path: Path):
     settings = get_settings()
-    respx.get(url__regex=r"https://photon\.komoot\.io/api/.*").mock(
+    respx.get(url__regex=r"https://geocode\.arcgis\.com/.*").mock(
         return_value=httpx.Response(
             200,
             json={
-                "features": [
+                "candidates": [
                     {
-                        "properties": {
-                            "name": "Hill Country Plumbing & Air",
-                            "city": "Austin",
-                            "state": "Texas",
-                            "housenumber": "1200",
-                            "street": "S Lamar Blvd",
-                            "postcode": "78704",
-                            "osm_type": "N",
-                            "osm_id": 42,
+                        "address": "Hill Country Plumbing & Air",
+                        "score": 99,
+                        "location": {"x": -97.75, "y": 30.25},
+                        "attributes": {
+                            "PlaceName": "Hill Country Plumbing & Air",
+                            "City": "Austin",
+                            "RegionAbbr": "TX",
+                            "StAddr": "1200 S Lamar Blvd",
+                            "AddNum": "1200",
+                            "Postal": "78704",
+                            "URL": "https://www.hillcountryplumbingair.com",
+                            "Phone": "512-555-0101",
                         },
-                        "geometry": {"coordinates": [-97.75, 30.25]},
                     }
                 ]
             },
@@ -159,7 +216,10 @@ async def test_discoverer_uses_photon_without_nominatim(tmp_path: Path):
     respx.get(url__regex=r"https://geocoding\.geo\.census\.gov/.*").mock(
         return_value=httpx.Response(200, json={"result": {"addressMatches": []}})
     )
-    respx.get(url__regex=r"https://(html|lite)\.duckduckgo\.com/.*").mock(side_effect=_empty_ddg)
+    respx.get(url__regex=r"https://(html|lite)\.duckduckgo\.com/.*").mock(side_effect=_empty_html)
+    respx.get(url__regex=r"https://www\.bing\.com/search.*").mock(side_effect=_empty_html)
+    respx.get(url__regex=r"https://search\.(brave|yahoo)\.com/.*").mock(side_effect=_empty_html)
+    respx.get(url__regex=r"https://crt\.sh/.*").mock(return_value=httpx.Response(200, json=[]))
     http = HttpClient(settings, cache=ResponseCache(tmp_path / "c.sqlite", 60))
     disc = DirectoryDiscoverer(http, settings)
     disc.fallback_where = "Austin, TX"
@@ -169,66 +229,25 @@ async def test_discoverer_uses_photon_without_nominatim(tmp_path: Path):
     )
     found = await disc.fill(b)
     await http.aclose()
-    assert found.get("poi") == "photon"
-    assert b.attributes.get("osm_id") == 42
-    assert b.address and b.address.line1 == "1200 S Lamar Blvd"
+    assert found.get("poi") == "arcgis"
+    assert b.address and "S Lamar" in (b.address.line1 or "")
     assert b.location and abs(b.location.lat - 30.25) < 0.01
-    assert not any("nominatim" in str(call.request.url) for call in respx.calls)
-
-
-@respx.mock
-async def test_discoverer_nominatim_is_last_resort(tmp_path: Path):
-    settings = get_settings()
-    respx.get(url__regex=r"https://photon\.komoot\.io/api/.*").mock(return_value=_empty_photon())
-    respx.get(url__regex=r"https://geocoding\.geo\.census\.gov/.*").mock(
-        return_value=httpx.Response(200, json={"result": {"addressMatches": []}})
-    )
-    respx.get(url__regex=r"https://(html|lite)\.duckduckgo\.com/.*").mock(side_effect=_empty_ddg)
-    respx.get(url__regex=r"https://nominatim\.openstreetmap\.org/search.*").mock(
-        return_value=httpx.Response(
-            200,
-            json=[
-                {
-                    "display_name": "Hill Country Plumbing, Austin, Texas",
-                    "lat": "30.25",
-                    "lon": "-97.75",
-                    "address": {
-                        "house_number": "1200",
-                        "road": "S Lamar Blvd",
-                        "city": "Austin",
-                        "ISO3166-2-lvl4": "US-TX",
-                        "postcode": "78704",
-                    },
-                    "extratags": {
-                        "website": "https://www.hillcountryplumbingair.com",
-                        "phone": "512-555-0101",
-                    },
-                }
-            ],
-        )
-    )
-    http = HttpClient(settings, cache=ResponseCache(tmp_path / "c.sqlite", 60))
-    disc = DirectoryDiscoverer(http, settings)
-    disc.fallback_where = "Austin, TX"
-    b = Business(
-        name="Hill Country Plumbing & Air",
-        address=Address(line1="1200 S Lamar Blvd", city="Austin", region="TX"),
-    )
-    found = await disc.fill(b)
-    await http.aclose()
-    assert found.get("geo") == "nominatim"
     assert b.website and "hillcountryplumbingair.com" in b.website
     assert b.phone_e164 == "+15125550101"
-    assert b.location and abs(b.location.lat - 30.25) < 0.01
+    assert not any("photon" in str(call.request.url) for call in respx.calls)
+    assert not any("nominatim" in str(call.request.url) for call in respx.calls)
 
 
 @respx.mock
 async def test_discoverer_falls_back_to_duckduckgo(tmp_path: Path):
     settings = get_settings()
-    respx.get(url__regex=r"https://photon\.komoot\.io/api/.*").mock(return_value=_empty_photon())
-    respx.get(url__regex=r"https://nominatim\.openstreetmap\.org/search.*").mock(
-        return_value=httpx.Response(200, json=[])
+    respx.get(url__regex=r"https://geocode\.arcgis\.com/.*").mock(side_effect=_empty_arcgis)
+    respx.get(url__regex=r"https://geocoding\.geo\.census\.gov/.*").mock(
+        return_value=httpx.Response(200, json={"result": {"addressMatches": []}})
     )
+    respx.get(url__regex=r"https://www\.bing\.com/search.*").mock(side_effect=_empty_html)
+    respx.get(url__regex=r"https://search\.(brave|yahoo)\.com/.*").mock(side_effect=_empty_html)
+    respx.get(url__regex=r"https://crt\.sh/.*").mock(return_value=httpx.Response(200, json=[]))
 
     def ddg(request: httpx.Request) -> httpx.Response:
         assert "Mozilla" in request.headers.get("user-agent", "")
@@ -300,50 +319,15 @@ async def test_apply_osm_contacts_from_overpass(tmp_path: Path):
 
 
 @respx.mock
-async def test_photon_fails_over_to_a_mirror(tmp_path: Path):
+async def test_website_search_uses_bing_first(tmp_path: Path):
     settings = get_settings()
-    respx.get(url__regex=r"https://photon\.komoot\.io/api/.*").mock(return_value=httpx.Response(503))
-    respx.get(url__regex=r"https://photon\.koalasec\.org/api/.*").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "features": [
-                    {
-                        "properties": {
-                            "name": "Airco Mechanical",
-                            "city": "Austin",
-                            "state": "Texas",
-                            "osm_type": "N",
-                            "osm_id": 7,
-                        },
-                        "geometry": {"coordinates": [-97.7, 30.3]},
-                    }
-                ]
-            },
-        )
-    )
-    http = HttpClient(settings, cache=ResponseCache(tmp_path / "c.sqlite", 60))
-    disc = DirectoryDiscoverer(http, settings)
-    disc.fallback_where = "Austin, TX"
-    b = Business(name="Airco Mechanical", address=Address(city="Austin", region="TX"))
-    assert await disc.fill_photon_many([b]) == 1
-    await http.aclose()
-    assert b.attributes.get("osm_id") == 7
-    assert not http.is_paused("photon.komoot.io")
-
-
-@respx.mock
-async def test_website_search_falls_back_to_bing_when_ddg_times_out(tmp_path: Path):
-    settings = get_settings()
-    respx.get(url__regex=r"https://(html|lite|api)\.duckduckgo\.com/.*").mock(
-        side_effect=httpx.ConnectTimeout("timed out")
-    )
     respx.get(url__regex=r"https://www\.bing\.com/search.*").mock(
         return_value=httpx.Response(
             200,
             text=(
                 '<ol id="b_results"><li class="b_algo"><h2>'
-                '<a href="https://www.1stcallplumbing.com/">1st Call</a></h2></li></ol>'
+                '<a href="https://www.1stcallplumbing.com/">1st Call</a></h2>'
+                "<p>(512) 555-0199</p></li></ol>"
             ),
         )
     )
@@ -354,5 +338,101 @@ async def test_website_search_falls_back_to_bing_when_ddg_times_out(tmp_path: Pa
     assert await disc.fill_website(b) is True
     await http.aclose()
     assert b.website and "1stcallplumbing.com" in b.website
-    assert not http.is_paused("html.duckduckgo.com")
-    assert not http.is_paused("lite.duckduckgo.com")
+    assert b.attributes.get("website_source") == "bing"
+    assert b.phone_e164 == "+15125550199"
+    assert not any("duckduckgo" in str(call.request.url) for call in respx.calls)
+
+
+@respx.mock
+async def test_website_search_falls_back_when_bing_times_out(tmp_path: Path):
+    settings = get_settings()
+    respx.get(url__regex=r"https://www\.bing\.com/search.*").mock(
+        side_effect=httpx.ConnectTimeout("timed out")
+    )
+    respx.get(url__regex=r"https://search\.(brave|yahoo)\.com/.*").mock(
+        side_effect=httpx.ConnectTimeout("timed out")
+    )
+    respx.get(url__regex=r"https://(html|lite)\.duckduckgo\.com/.*").mock(
+        return_value=httpx.Response(200, text=DDG_HTML)
+    )
+    http = HttpClient(settings, cache=ResponseCache(tmp_path / "c.sqlite", 60))
+    disc = DirectoryDiscoverer(http, settings)
+    disc.fallback_where = "Austin, TX"
+    b = Business(name="1ST CALL PLUMBING HEATING & AIR LTD")
+    assert await disc.fill_website(b) is True
+    await http.aclose()
+    assert b.website and "1stcallplumbing.com" in b.website
+    assert not http.is_paused("www.bing.com")
+    assert http.host_available("www.bing.com") is False
+
+
+@respx.mock
+async def test_match_overpass_fills_website_and_phone(tmp_path: Path):
+    settings = get_settings()
+    respx.post(url__regex=r"https://overpass.*").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "elements": [
+                    {
+                        "type": "node",
+                        "id": 9,
+                        "lat": 30.27,
+                        "lon": -97.74,
+                        "tags": {
+                            "name": "Airco Mechanical",
+                            "addr:city": "Austin",
+                            "addr:state": "TX",
+                            "addr:housenumber": "100",
+                            "addr:street": "Main St",
+                            "website": "https://www.airco.com",
+                            "phone": "512-555-0199",
+                        },
+                    }
+                ]
+            },
+        )
+    )
+    http = HttpClient(settings, cache=ResponseCache(tmp_path / "c.sqlite", 60))
+    disc = DirectoryDiscoverer(http, settings)
+    b = Business(name="Airco Mechanical", address=Address(city="Austin", region="TX"))
+    n = await disc.match_overpass([b], ["craft=hvac"], 30.27, -97.74, 25)
+    await http.aclose()
+    assert n == 1
+    assert b.website and "airco.com" in b.website
+    assert b.phone_e164 == "+15125550199"
+    assert b.address and b.address.line1 == "100 Main St"
+
+
+@respx.mock
+async def test_geocode_batch_falls_back_to_arcgis(tmp_path: Path):
+    settings = get_settings()
+    b = Business(
+        name="Airco",
+        address=Address(line1="100 Main St", city="Austin", region="TX", postal_code="78701"),
+    )
+    respx.post(url__regex=r"https://geocoding\.geo\.census\.gov/.*").mock(
+        return_value=httpx.Response(200, text=f'"{b.id}","x","No_Match","",,,,\n')
+    )
+    respx.get(url__regex=r"https://geocode\.arcgis\.com/.*").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "address": "100 Main St, Austin, TX",
+                        "score": 100,
+                        "location": {"x": -97.74, "y": 30.27},
+                        "attributes": {"City": "Austin", "RegionAbbr": "TX"},
+                    }
+                ]
+            },
+        )
+    )
+    http = HttpClient(settings, cache=ResponseCache(tmp_path / "c.sqlite", 60))
+    disc = DirectoryDiscoverer(http, settings)
+    n = await disc.geocode_batch([b])
+    await http.aclose()
+    assert n == 1
+    assert b.location and abs(b.location.lat - 30.27) < 0.01
+    assert b.attributes.get("geo_source") == "arcgis"

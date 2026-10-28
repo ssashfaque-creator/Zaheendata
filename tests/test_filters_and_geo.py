@@ -9,6 +9,7 @@ from zaheendata.geo import (
     SearchCell,
     grid_cells,
     haversine_km,
+    known_place,
     normalize_state,
     parse_location_text,
 )
@@ -111,6 +112,8 @@ def test_geo_helpers():
     )
     assert parse_location_text("Austin, TX") == ("Austin", "TX")
     assert parse_location_text("Austin Texas") == ("Austin", "TX")
+    austin = known_place("Austin, TX")
+    assert austin is not None and abs(austin.lat - 30.2672) < 0.001
     assert (
         round(haversine_km(GeoPoint(lat=30.2672, lng=-97.7431), GeoPoint(lat=32.7767, lng=-96.797)), 0) == 293
     )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -205,6 +206,37 @@ async def test_connect_timeout_does_not_pause_host(tmp_path: Path):
             await http.get("https://html.duckduckgo.com/html/", retries=1, timeout_seconds=1)
         assert not http.is_paused("html.duckduckgo.com")
         assert http.host_available("html.duckduckgo.com") is False
+    finally:
+        await http.aclose()
+
+
+@respx.mock
+async def test_connect_error_does_not_stampede_a_dead_host(tmp_path: Path):
+    hits = {"n": 0}
+
+    def boom(_request: httpx.Request) -> httpx.Response:
+        hits["n"] += 1
+        raise httpx.ConnectError("All connection attempts failed")
+
+    respx.get(url__regex=r"https://photon\.komoot\.io/api/.*").mock(side_effect=boom)
+    http = HttpClient(get_settings(), cache=ResponseCache(tmp_path / "c.sqlite", 100))
+    http.set_host_rate("photon.komoot.io", 1.0, concurrency=1)
+    try:
+        results = await asyncio.gather(
+            *[
+                http.get(
+                    "https://photon.komoot.io/api/",
+                    params={"q": str(i)},
+                    retries=1,
+                    timeout_seconds=1,
+                )
+                for i in range(8)
+            ],
+            return_exceptions=True,
+        )
+        assert hits["n"] == 1
+        assert sum(isinstance(r, HostUnavailable) for r in results) >= 6
+        assert not http.is_paused("photon.komoot.io")
     finally:
         await http.aclose()
 

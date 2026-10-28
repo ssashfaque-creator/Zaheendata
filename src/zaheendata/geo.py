@@ -72,6 +72,27 @@ US_STATES: dict[str, tuple[str, float, float, float, float]] = {
 STATE_NAME_TO_CODE = {name.lower(): code for code, (name, *_rest) in US_STATES.items()}
 EARTH_RADIUS_KM = 6371.0088
 
+# Offline metro centroids so Overpass still has a center when public geocoders are down.
+KNOWN_PLACES: dict[str, tuple[float, float]] = {
+    "austin, tx": (30.2672, -97.7431),
+    "houston, tx": (29.7604, -95.3698),
+    "dallas, tx": (32.7767, -96.7970),
+    "san antonio, tx": (29.4241, -98.4936),
+    "fort worth, tx": (32.7555, -97.3308),
+    "el paso, tx": (31.7619, -106.4850),
+    "los angeles, ca": (34.0522, -118.2437),
+    "san francisco, ca": (37.7749, -122.4194),
+    "seattle, wa": (47.6062, -122.3321),
+    "chicago, il": (41.8781, -87.6298),
+    "new york, ny": (40.7128, -74.0060),
+    "baton rouge, la": (30.4515, -91.1871),
+    "berkeley, ca": (37.8715, -122.2730),
+}
+
+ARCGIS_GEOCODE_URL = (
+    "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates"
+)
+
 
 def haversine_km(a: GeoPoint, b: GeoPoint) -> float:
     lat1, lng1, lat2, lng2 = map(math.radians, (a.lat, a.lng, b.lat, b.lng))
@@ -97,6 +118,16 @@ def parse_location_text(text: str) -> tuple[str, str | None]:
     if m and normalize_state(m.group(2)):
         return m.group(1).strip(), normalize_state(m.group(2))
     return text.strip(), None
+
+
+def known_place(text: str) -> GeoPoint | None:
+    """Return a built-in centroid for a well-known 'City, ST' string."""
+    city, state = parse_location_text(text)
+    key = f"{city.lower()}, {state.lower()}" if state else city.lower()
+    coords = KNOWN_PLACES.get(key)
+    if coords is None:
+        return None
+    return GeoPoint(lat=coords[0], lng=coords[1])
 
 
 @dataclass(frozen=True)
@@ -147,7 +178,11 @@ def normalize_county(name: str | None) -> str | None:
 
 
 class Geocoder:
-    """Google Geocoding when a key is configured, otherwise Nominatim (OSM)."""
+    """Google Geocoding when a key is configured; otherwise ArcGIS, then a built-in city table.
+
+    Nominatim is not used here: the public instance times out from many networks and would
+    stall collect before any registry is queried.
+    """
 
     def __init__(self, http: HttpClient):
         self.http = http
@@ -161,32 +196,54 @@ class Geocoder:
         """Return (point, county) where county is normalised like "Travis" (no "County" suffix)."""
         key = None if self.settings.defer_google_places else self.settings.secret("google_maps_api_key")
         if key:
+            try:
+                data = await self.http.get_json(
+                    "https://maps.googleapis.com/maps/api/geocode/json",
+                    params={"address": text, "key": key},
+                    meter="google_places.geocode",
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.debug("geo.google_failed", error=str(exc)[:200])
+                data = {}
+            results = (data or {}).get("results") or []
+            if results:
+                loc = results[0]["geometry"]["location"]
+                county = next(
+                    (
+                        c.get("long_name")
+                        for c in results[0].get("address_components", [])
+                        if "administrative_area_level_2" in c.get("types", [])
+                    ),
+                    None,
+                )
+                return GeoPoint(lat=loc["lat"], lng=loc["lng"]), normalize_county(county)
+        try:
+            self.http.set_host_rate("geocode.arcgis.com", 4.0, concurrency=4)
             data = await self.http.get_json(
-                "https://maps.googleapis.com/maps/api/geocode/json",
-                params={"address": text, "key": key},
-                meter="google_places.geocode",
+                ARCGIS_GEOCODE_URL,
+                params={
+                    "f": "json",
+                    "SingleLine": text,
+                    "maxLocations": 1,
+                    "outFields": "City,Region,Subregion,RegionAbbr",
+                    "countryCode": "USA",
+                },
+                timeout_seconds=8.0,
+                retries=1,
             )
-            results = data.get("results") or []
-            if not results:
-                return None
-            loc = results[0]["geometry"]["location"]
-            county = next(
-                (
-                    c.get("long_name")
-                    for c in results[0].get("address_components", [])
-                    if "administrative_area_level_2" in c.get("types", [])
-                ),
-                None,
-            )
-            return GeoPoint(lat=loc["lat"], lng=loc["lng"]), normalize_county(county)
-        data = await self.http.get_json(
-            f"{self.settings.nominatim_url}/search",
-            params={"q": text, "format": "json", "limit": 1, "countrycodes": "us", "addressdetails": 1},
-        )
-        if not data:
-            return None
-        county = (data[0].get("address") or {}).get("county")
-        return GeoPoint(lat=float(data[0]["lat"]), lng=float(data[0]["lon"])), normalize_county(county)
+            cands = (data or {}).get("candidates") or []
+            if cands:
+                loc = cands[0].get("location") or {}
+                attrs = cands[0].get("attributes") or {}
+                if loc.get("y") is not None and loc.get("x") is not None:
+                    county = normalize_county(str(attrs.get("Subregion") or "") or None)
+                    return GeoPoint(lat=float(loc["y"]), lng=float(loc["x"])), county
+        except Exception as exc:  # noqa: BLE001
+            log.debug("geo.arcgis_failed", error=str(exc)[:200])
+        point = known_place(text)
+        if point:
+            return point, None
+        return None
 
 
 class GeoPlanner:

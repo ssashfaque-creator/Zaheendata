@@ -1,9 +1,10 @@
 """Free discovery of website, address and phone before Google Places runs.
 
 Used in the enrich stage so a registry-only long list (often just a legal name) can still be
-crawled and scored. Census batch geocodes streets in one call; Photon finds the OSM POI;
-Overpass pulls website/phone tags for those OSM ids together; DuckDuckGo fills remaining
-websites. Nominatim is a fail-fast last resort only.
+crawled and scored. Photon/Nominatim public endpoints time out from many networks, so enrich
+never calls them. Census batch geocodes streets; one Overpass query matches OSM POIs by tag
+and by name; ArcGIS World Geocoding fills remaining POI/address gaps; Bing/Brave/Yahoo/DDG
+and crt.sh find websites. Every company is processed — a dead host skips that host, not the row.
 """
 
 from __future__ import annotations
@@ -11,12 +12,14 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import re
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from bs4 import BeautifulSoup
 from rapidfuzz import fuzz
 
+from ..geo import known_place
 from ..http import HostPaused, HostUnavailable, HttpClient
 from ..logging import get_logger
 from ..models import Address, Business, GeoPoint, OwnerContact
@@ -34,14 +37,18 @@ log = get_logger(__name__)
 
 DDG_URL = "https://html.duckduckgo.com/html/"
 DDG_LITE_URL = "https://lite.duckduckgo.com/lite/"
-DDG_API_URL = "https://api.duckduckgo.com/"
 BING_URL = "https://www.bing.com/search"
-PHOTON_URL = "https://photon.komoot.io/api/"
+BRAVE_URL = "https://search.brave.com/search"
+YAHOO_URL = "https://search.yahoo.com/search"
+ARCGIS_URL = "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates"
 CENSUS_GEOCODER_URL = "https://geocoding.geo.census.gov/geocoder/locations/address"
 CENSUS_BATCH_URL = "https://geocoding.geo.census.gov/geocoder/locations/addressbatch"
+CRTSH_URL = "https://crt.sh/"
 WEBSITE_MATCH_THRESHOLD = 55
-NOMINATIM_MATCH_THRESHOLD = 80
 PHOTON_MATCH_THRESHOLD = 85
+ARCGIS_SCORE_MIN = 80
+US_PHONE_RE = re.compile(r"(?:\+1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
+_OVERPASS_SAFE = re.compile(r"[^A-Za-z0-9 ]+")
 # DDG's HTML endpoint returns an empty homepage (HTTP 202) for bot UAs.
 DDG_HEADERS = {
     "User-Agent": (
@@ -96,6 +103,10 @@ JUNK_HOSTS = {
     "hotfrog.com",
     "brownbook.net",
     "cylex.us.com",
+    "brave.com",
+    "search.brave.com",
+    "yahoo.com",
+    "search.yahoo.com",
 }
 
 
@@ -168,6 +179,30 @@ def parse_ddg_api(payload: dict[str, Any]) -> list[str]:
     return out
 
 
+def parse_crtsh(rows: list[Any]) -> list[str]:
+    """Hostnames from Certificate Transparency (the company actually requested that cert)."""
+    urls: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        blobs = [str(row.get("common_name") or ""), str(row.get("name_value") or "")]
+        for blob in blobs:
+            for part in blob.replace(",", " ").split():
+                host = part.strip().lower().lstrip("*.")
+                if host.startswith("www."):
+                    host = host[4:]
+                if "." not in host or " " in host or host.endswith(".local"):
+                    continue
+                if any(host.endswith(j) for j in (".csv", ".png", ".jpg")):
+                    continue
+                url = normalize_url("https://" + host)
+                if url and url not in seen:
+                    seen.add(url)
+                    urls.append(url)
+    return urls
+
+
 def parse_bing_html(html: str) -> list[str]:
     soup = BeautifulSoup(html or "", "html.parser")
     urls: list[str] = []
@@ -182,6 +217,82 @@ def parse_bing_html(html: str) -> list[str]:
         seen.add(url)
         urls.append(url)
     return urls
+
+
+def parse_bing_results(html: str) -> list[tuple[str, str | None]]:
+    """Bing SERP rows as (url, phone) so a result can fill both website and phone."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    rows: list[tuple[str, str | None]] = []
+    seen: set[str] = set()
+    blocks = soup.select("li.b_algo") or soup.find_all("li")
+    for block in blocks:
+        a = block.find("a", href=True)
+        url = normalize_url(_href_str(a.get("href") if a else None))
+        if not url or url in seen:
+            continue
+        host = extract_domain(url) or ""
+        if host in {"bing.com", "microsoft.com", "msn.com"} or host.endswith(".bing.com"):
+            continue
+        seen.add(url)
+        phone: str | None = None
+        tel = block.find("a", href=re.compile(r"^tel:", re.I))
+        if tel:
+            phone = normalize_phone(_href_str(tel.get("href")).replace("tel:", "", 1))
+        if not phone:
+            match = US_PHONE_RE.search(block.get_text(" ", strip=True))
+            if match:
+                phone = normalize_phone(match.group(0))
+        rows.append((url, phone))
+    if not rows:
+        rows = [(url, None) for url in parse_bing_html(html)]
+    return rows
+
+
+def parse_arcgis_candidates(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Turn ArcGIS findAddressCandidates JSON into the same feature shape Overpass uses."""
+    features: list[dict[str, Any]] = []
+    for cand in payload.get("candidates") or []:
+        if not isinstance(cand, dict):
+            continue
+        attrs = cand.get("attributes") or {}
+        loc = cand.get("location") or {}
+        try:
+            lng = float(loc.get("x"))
+            lat = float(loc.get("y"))
+        except (TypeError, ValueError):
+            continue
+        street = str(attrs.get("StAddr") or "").strip() or None
+        house = str(attrs.get("AddNum") or "").strip() or None
+        if street and house and street.lower().startswith(house.lower()):
+            house = None
+        features.append(
+            {
+                "properties": {
+                    "name": str(attrs.get("PlaceName") or cand.get("address") or ""),
+                    "city": attrs.get("City"),
+                    "state": attrs.get("RegionAbbr") or attrs.get("Region"),
+                    "housenumber": house,
+                    "street": street,
+                    "postcode": attrs.get("Postal"),
+                    "website": attrs.get("URL"),
+                    "phone": attrs.get("Phone"),
+                    "score": float(cand.get("score") or 0),
+                },
+                "geometry": {"coordinates": [lng, lat]},
+            }
+        )
+    return features
+
+
+def overpass_name_needle(name: str) -> str | None:
+    """Strip legal suffixes and punctuation so an Overpass name regex stays valid."""
+    text = _OVERPASS_SAFE.sub(" ", name)
+    suffixes = r"\b(INC|INCORPORATED|LLC|LTD|LIMITED|CORP|CORPORATION|CO|COMPANY|PLLC)\b"
+    text = re.sub(suffixes, "", text, flags=re.I)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) < 5:
+        return None
+    return text[:40]
 
 
 def pick_website(business_name: str, urls: list[str]) -> str | None:
@@ -380,20 +491,16 @@ class DirectoryDiscoverer:
         self.http = http
         self.settings = settings or get_settings()
         self.fallback_where = ""
-        # Photon and Census can run several at once. DuckDuckGo stays at 1 conn/host; we split
-        # html vs lite so website search is ~2/s without doubling up on one endpoint.
+        # Search engines stay polite; Bing is the primary website source so it gets 2 slots.
+        # Photon/Nominatim are intentionally not used — they hang from many networks.
         self.http.set_host_rate("html.duckduckgo.com", 1.0, concurrency=1)
         self.http.set_host_rate("lite.duckduckgo.com", 1.0, concurrency=1)
-        self.http.set_host_rate("api.duckduckgo.com", 1.0, concurrency=1)
-        self.http.set_host_rate("www.bing.com", 1.0, concurrency=1)
-        for photon in self.settings.photon_urls:
-            host = urlparse(photon).netloc
-            if host:
-                self.http.set_host_rate(host, 1.0, concurrency=1)
+        self.http.set_host_rate("www.bing.com", 2.0, concurrency=2)
+        self.http.set_host_rate("search.brave.com", 1.0, concurrency=1)
+        self.http.set_host_rate("search.yahoo.com", 1.0, concurrency=1)
+        self.http.set_host_rate("crt.sh", 0.5, concurrency=1)
+        self.http.set_host_rate("geocode.arcgis.com", 4.0, concurrency=4)
         self.http.set_host_rate("geocoding.geo.census.gov", 4.0, concurrency=4)
-        host = urlparse(self.settings.nominatim_url).netloc
-        if host:
-            self.http.set_host_rate(host, 1.0, concurrency=1)
 
     def _fast(self) -> dict[str, Any]:
         return {
@@ -409,7 +516,7 @@ class DirectoryDiscoverer:
         return built or self.fallback_where
 
     async def fill(self, b: Business) -> dict[str, str]:
-        """Best-effort fill. Census, Photon and DuckDuckGo run together; Nominatim is last resort."""
+        """Best-effort fill. Census, ArcGIS POI and website search run together. No Photon."""
         found: dict[str, str] = {}
 
         async def census() -> None:
@@ -419,34 +526,18 @@ class DirectoryDiscoverer:
             except Exception as exc:  # noqa: BLE001
                 log.debug("discover.census_failed", name=b.name, error=str(exc)[:200])
 
-        async def photon() -> None:
+        async def arcgis() -> None:
             try:
-                if await self._photon(b):
-                    found["poi"] = "photon"
+                if await self._arcgis(b, poi=True):
+                    found["poi"] = "arcgis"
             except Exception as exc:  # noqa: BLE001
-                log.debug("discover.photon_failed", name=b.name, error=str(exc)[:200])
+                log.debug("discover.arcgis_failed", name=b.name, error=str(exc)[:200])
 
-        async def ddg() -> None:
+        async def web() -> None:
             if await self.fill_website(b):
-                found["website"] = b.attributes.get("website_source") or "duckduckgo"
+                found["website"] = b.attributes.get("website_source") or "search"
 
-        await asyncio.gather(census(), photon(), ddg(), return_exceptions=True)
-        # Photon already queried OSM. Nominatim is only for rows Photon missed entirely.
-        if (
-            not b.website
-            and not b.phone_e164
-            and not b.attributes.get("osm_id")
-            and not self.http.is_paused(urlparse(self.settings.nominatim_url).netloc)
-        ):
-            try:
-                if await self._nominatim(b):
-                    found.setdefault("geo", "nominatim")
-                    if b.website:
-                        found.setdefault("website", "nominatim")
-            except (HostPaused, HostUnavailable):
-                pass
-            except Exception as exc:  # noqa: BLE001
-                log.debug("discover.nominatim_failed", name=b.name, error=str(exc)[:200])
+        await asyncio.gather(census(), arcgis(), web(), return_exceptions=True)
         if found:
             log.info("discover.filled", name=b.name, **found)
         return found
@@ -475,6 +566,7 @@ class DirectoryDiscoverer:
         except Exception as exc:  # noqa: BLE001
             log.debug("discover.census_batch_failed", error=str(exc)[:200])
             filled = 0
+
             async def one(b: Business) -> None:
                 nonlocal filled
                 try:
@@ -484,10 +576,14 @@ class DirectoryDiscoverer:
                     log.debug("discover.census_failed", name=b.name, error=str(err)[:200])
 
             await asyncio.gather(*(one(b) for b in need), return_exceptions=True)
+            missed = [b for b in need if b.location is None]
+            if missed:
+                filled += await self._geocode_arcgis_many(missed)
             return filled
         if resp.status_code >= 400:
             log.debug("discover.census_batch_status", status=resp.status_code)
-            return 0
+            missed = [b for b in need if b.location is None]
+            return await self._geocode_arcgis_many(missed) if missed else 0
         points = parse_census_batch(resp.text)
         n = 0
         for b in need:
@@ -498,63 +594,264 @@ class DirectoryDiscoverer:
             b.attributes["geo_source"] = "census"
             n += 1
         log.info("discover.census_batch", submitted=len(need), matched=n)
+        missed = [b for b in need if b.location is None]
+        if missed:
+            n += await self._geocode_arcgis_many(missed)
         return n
 
-    async def fill_photon_many(self, businesses: list[Business]) -> int:
+    async def _geocode_arcgis_many(self, businesses: list[Business]) -> int:
+        """Street geocode for Census misses. Does not search by business name."""
         filled = 0
+        sem = asyncio.Semaphore(4)
 
         async def one(b: Business) -> None:
             nonlocal filled
-            try:
-                if await self._photon(b):
-                    filled += 1
-            except Exception as exc:  # noqa: BLE001
-                log.debug("discover.photon_failed", name=b.name, error=str(exc)[:200])
+            async with sem:
+                try:
+                    if await self._arcgis(b, poi=False):
+                        filled += 1
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("discover.arcgis_geocode_failed", name=b.name, error=str(exc)[:200])
 
         await asyncio.gather(*(one(b) for b in businesses), return_exceptions=True)
+        if filled:
+            log.info("discover.arcgis_geocode", filled=filled, submitted=len(businesses))
         return filled
 
-    async def fill_osm_many(self, businesses: list[Business]) -> int:
-        """Photon (with mirrors), then Nominatim for rows Photon could not fill."""
-        n = await self.fill_photon_many(businesses)
+    async def fill_arcgis_many(self, businesses: list[Business]) -> int:
+        """POI lookup for rows still missing website, phone, or a street after OSM."""
         need = [
             b
             for b in businesses
-            if not b.attributes.get("osm_id")
-            and (not b.website or not b.phone_e164 or not (b.address and b.address.line1))
+            if not b.website or not b.phone_e164 or not (b.address and b.address.line1)
         ]
         if not need:
-            return n
-        extra = 0
+            return 0
+        filled = 0
+        sem = asyncio.Semaphore(4)
 
         async def one(b: Business) -> None:
-            nonlocal extra
-            try:
-                if await self._nominatim(b):
-                    extra += 1
-            except (HostPaused, HostUnavailable):
-                return
-            except Exception as exc:  # noqa: BLE001
-                log.debug("discover.nominatim_failed", name=b.name, error=str(exc)[:200])
+            nonlocal filled
+            async with sem:
+                try:
+                    if await self._arcgis(b, poi=True):
+                        filled += 1
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("discover.arcgis_failed", name=b.name, error=str(exc)[:200])
 
         await asyncio.gather(*(one(b) for b in need), return_exceptions=True)
-        return n + extra
+        if filled:
+            log.info("discover.arcgis_poi", filled=filled, submitted=len(need))
+        return filled
+
+    async def geocode_place(self, text: str) -> GeoPoint | None:
+        """Geocode a city/metro string via ArcGIS, then a built-in table. No Nominatim."""
+        if not (text or "").strip():
+            return None
+        host = urlparse(ARCGIS_URL).netloc
+        if host and self.http.host_available(host):
+            try:
+                data = await self.http.get_json(
+                    ARCGIS_URL,
+                    params={
+                        "f": "json",
+                        "SingleLine": text,
+                        "maxLocations": 1,
+                        "outFields": "City,Region,RegionAbbr,Postal",
+                        "countryCode": "USA",
+                    },
+                    **self._fast(),
+                )
+                feats = parse_arcgis_candidates(data if isinstance(data, dict) else {})
+                if feats:
+                    coords = (feats[0].get("geometry") or {}).get("coordinates") or []
+                    if len(coords) >= 2:
+                        return GeoPoint(lat=float(coords[1]), lng=float(coords[0]))
+            except (HostPaused, HostUnavailable):
+                pass
+            except Exception as exc:  # noqa: BLE001
+                log.debug("discover.place_geocode_failed", error=str(exc)[:200])
+        return known_place(text)
+
+    async def match_overpass(
+        self,
+        businesses: list[Business],
+        osm_tags: list[str],
+        lat: float,
+        lng: float,
+        radius_km: float,
+    ) -> int:
+        """One Overpass query for the metro; match POIs onto the long list by name + city."""
+        if not businesses or not osm_tags:
+            return 0
+        clauses: list[str] = []
+        radius_m = max(1000, int(radius_km * 1000))
+        for tag in osm_tags:
+            key, _, value = tag.partition("=")
+            clauses.append(f'nwr["{key}"="{value}"](around:{radius_m},{lat},{lng});')
+        query = f"[out:json][timeout:25];({''.join(clauses)});out center tags 800;"
+        data = await self._overpass_query(query)
+        features: list[dict[str, Any]] = []
+        for el in data.get("elements") or []:
+            tags = el.get("tags") or {}
+            name = tags.get("name")
+            if not name:
+                continue
+            plat = el.get("lat") or (el.get("center") or {}).get("lat")
+            plng = el.get("lon") or (el.get("center") or {}).get("lon")
+            features.append(
+                {
+                    "properties": {
+                        "name": name,
+                        "city": tags.get("addr:city"),
+                        "state": tags.get("addr:state"),
+                        "housenumber": tags.get("addr:housenumber"),
+                        "street": tags.get("addr:street"),
+                        "postcode": tags.get("addr:postcode"),
+                        "osm_type": {"node": "N", "way": "W", "relation": "R"}.get(str(el.get("type")), "N"),
+                        "osm_id": el.get("id"),
+                        "website": tags.get("website") or tags.get("contact:website"),
+                        "phone": tags.get("phone") or tags.get("contact:phone"),
+                    },
+                    "geometry": {"coordinates": [float(plng or 0), float(plat or 0)]},
+                }
+            )
+        filled = self._assign_osm_features(businesses, features)
+        if filled:
+            log.info("discover.overpass_matched", filled=filled, pois=len(features))
+        remaining = [b for b in businesses if not b.website or not b.phone_e164]
+        if remaining:
+            filled += await self._match_overpass_names(remaining, lat, lng, radius_km)
+        return filled
+
+    def _assign_osm_features(self, businesses: list[Business], features: list[dict[str, Any]]) -> int:
+        filled = 0
+        available = features
+        for b in businesses:
+            city = b.address.city if b.address else None
+            region = b.address.region if b.address else None
+            feat = photon_pick(b.name, city, region, available)
+            if feat is None:
+                continue
+            available = [f for f in available if f is not feat]
+            if self._apply_osm_feature(b, feat):
+                filled += 1
+        return filled
+
+    async def _match_overpass_names(
+        self, businesses: list[Business], lat: float, lng: float, radius_km: float
+    ) -> int:
+        """Second Overpass pass: match remaining rows by business name, not craft= tag."""
+        radius_m = max(1000, int(radius_km * 1000))
+        needles: list[tuple[Business, str]] = []
+        seen: set[str] = set()
+        for b in businesses:
+            needle = overpass_name_needle(b.name)
+            if not needle or needle.lower() in seen:
+                continue
+            seen.add(needle.lower())
+            needles.append((b, needle))
+        if not needles:
+            return 0
+        filled = 0
+        for i in range(0, len(needles), 12):
+            chunk = needles[i : i + 12]
+            pattern = "|".join(n for _, n in chunk)
+            query = (
+                f'[out:json][timeout:20];(nwr["name"~"{pattern}",i](around:{radius_m},{lat},{lng}););'
+                "out center tags 400;"
+            )
+            data = await self._overpass_query(query)
+            features: list[dict[str, Any]] = []
+            for el in data.get("elements") or []:
+                tags = el.get("tags") or {}
+                name = tags.get("name")
+                if not name:
+                    continue
+                plat = el.get("lat") or (el.get("center") or {}).get("lat")
+                plng = el.get("lon") or (el.get("center") or {}).get("lon")
+                features.append(
+                    {
+                        "properties": {
+                            "name": name,
+                            "city": tags.get("addr:city"),
+                            "state": tags.get("addr:state"),
+                            "housenumber": tags.get("addr:housenumber"),
+                            "street": tags.get("addr:street"),
+                            "postcode": tags.get("addr:postcode"),
+                            "osm_type": {"node": "N", "way": "W", "relation": "R"}.get(
+                                str(el.get("type")), "N"
+                            ),
+                            "osm_id": el.get("id"),
+                            "website": tags.get("website") or tags.get("contact:website"),
+                            "phone": tags.get("phone") or tags.get("contact:phone"),
+                        },
+                        "geometry": {"coordinates": [float(plng or 0), float(plat or 0)]},
+                    }
+                )
+            n = self._assign_osm_features([b for b, _ in chunk], features)
+            filled += n
+        if filled:
+            log.info("discover.overpass_names", filled=filled)
+        return filled
+
+    def _apply_osm_feature(self, b: Business, feat: dict[str, Any]) -> bool:
+        props = feat.get("properties") or {}
+        changed = False
+        coords = (feat.get("geometry") or {}).get("coordinates") or []
+        if b.location is None and len(coords) >= 2 and (coords[0] or coords[1]):
+            b.location = GeoPoint(lat=float(coords[1]), lng=float(coords[0]))
+            changed = True
+        cur = b.address or Address()
+        house, street = props.get("housenumber"), props.get("street")
+        line1 = " ".join(str(p) for p in (house, street) if p) or None
+        if line1 and not cur.line1:
+            cur.line1 = line1
+            changed = True
+        if props.get("city") and not cur.city:
+            cur.city = str(props["city"])
+            changed = True
+        if props.get("postcode") and not cur.postal_code:
+            cur.postal_code = str(props["postcode"])
+            changed = True
+        if changed:
+            b.address = cur
+        if props.get("osm_type") and props.get("osm_id"):
+            b.attributes["osm_type"] = str(props["osm_type"])
+            b.attributes["osm_id"] = props["osm_id"]
+        if not b.website:
+            url = normalize_url(props.get("website"))
+            if url and not is_social_or_directory_url(url):
+                b.website = url
+                b.domain = extract_domain(url)
+                b.attributes["website_source"] = "osm"
+                changed = True
+        if not b.phone_e164:
+            e164 = normalize_phone(props.get("phone"))
+            if e164:
+                b.phone_e164 = e164
+                changed = True
+        if changed:
+            b.attributes["poi_source"] = "overpass"
+        return changed
 
     async def fill_website(self, b: Business) -> bool:
         if b.website:
             return False
         try:
-            url = await self._duckduckgo(b)
+            url, phone, source = await self._search_website(b)
         except HostPaused:
             return False
         except Exception as exc:  # noqa: BLE001
-            log.debug("discover.ddg_failed", name=b.name, error=str(exc)[:200])
+            log.debug("discover.search_failed", name=b.name, error=str(exc)[:200])
             return False
         if not url:
             return False
         b.website = url
         b.domain = extract_domain(url)
-        b.attributes["website_source"] = "duckduckgo"
+        b.attributes["website_source"] = source
+        if phone and not b.phone_e164:
+            b.phone_e164 = phone
         return True
 
     async def apply_osm_contacts(self, businesses: list[Business]) -> int:
@@ -610,16 +907,22 @@ class DirectoryDiscoverer:
         if not parts:
             return {}
         query = f"[out:json][timeout:20];({''.join(parts)});out tags;"
+        return await self._overpass_query(query)
+
+    async def _overpass_query(self, query: str) -> dict[str, Any]:
         urls = [self.settings.overpass_url, *self.settings.overpass_fallback_urls]
         last: Exception | None = None
         for url in urls:
             host = urlparse(url).netloc
             if host:
                 self.http.set_host_rate(host, 0.3, concurrency=1)
-            if self.http.is_paused(host):
+            if host and not self.http.host_available(host):
                 continue
             try:
-                data = await self.http.post_json(url, data={"data": query}, retries=1, timeout_seconds=20.0)
+                data = await self.http.post_json(url, data={"data": query}, retries=1, timeout_seconds=25.0)
+            except (HostPaused, HostUnavailable) as exc:
+                last = exc
+                continue
             except Exception as exc:  # noqa: BLE001
                 last = exc
                 log.debug("discover.overpass_failed", url=url, error=str(exc)[:200])
@@ -652,168 +955,104 @@ class DirectoryDiscoverer:
         b.attributes["geo_source"] = "census"
         return True
 
-    async def _photon(self, b: Business) -> bool:
-        where = self._where(b)
-        query = f"{b.name} {where}".strip()
-        if not query:
+    async def _arcgis(self, b: Business, *, poi: bool) -> bool:
+        host = urlparse(ARCGIS_URL).netloc
+        if host and not self.http.host_available(host):
             return False
-        data: Any = None
-        bases = list(self.settings.photon_urls) or [PHOTON_URL]
-        for base in bases:
-            host = urlparse(base).netloc
-            if host:
-                self.http.set_host_rate(host, 1.0, concurrency=1)
-            if host and not self.http.host_available(host):
-                continue
-            try:
-                data = await self.http.get_json(
-                    base, params={"q": query, "limit": 5, "lang": "en"}, **self._fast()
-                )
-                break
-            except (HostPaused, HostUnavailable):
-                continue
-            except Exception as exc:  # noqa: BLE001
-                log.debug("discover.photon_endpoint_failed", url=base, error=str(exc)[:200])
-                continue
-        if not isinstance(data, dict):
+        if poi:
+            query = f"{b.name} {self._where(b)}".strip()
+            if not query:
+                return False
+            params: dict[str, Any] = {
+                "f": "json",
+                "SingleLine": query,
+                "maxLocations": 5,
+                "outFields": (
+                    "PlaceName,Place_addr,StAddr,AddNum,City,Region,RegionAbbr,Postal,Phone,URL,Type"
+                ),
+                "countryCode": "USA",
+                "category": "POI",
+            }
+        else:
+            addr = b.address
+            if not addr or not addr.line1:
+                return False
+            line = ", ".join(p for p in (addr.line1, addr.city, addr.region, addr.postal_code) if p)
+            params = {
+                "f": "json",
+                "SingleLine": line,
+                "maxLocations": 1,
+                "outFields": "StAddr,AddNum,City,Region,RegionAbbr,Postal",
+                "countryCode": "USA",
+            }
+        try:
+            data = await self.http.get_json(ARCGIS_URL, params=params, **self._fast())
+        except (HostPaused, HostUnavailable):
             return False
-        features = data.get("features") if isinstance(data, dict) else None
-        city, region = (b.address.city if b.address else None), (b.address.region if b.address else None)
-        if not city and "," in where:
-            city, region = (p.strip() for p in where.split(",", 1))
-            region = region.split()[0] if region else region
-        feat = photon_pick(b.name, city, region, features or [])
+        features = parse_arcgis_candidates(data if isinstance(data, dict) else {})
+        if not features:
+            return False
+        if not poi:
+            feat = features[0]
+            score = float((feat.get("properties") or {}).get("score") or 0)
+            if score and score < ARCGIS_SCORE_MIN:
+                return False
+            coords = (feat.get("geometry") or {}).get("coordinates") or []
+            if b.location is None and len(coords) >= 2 and (coords[0] or coords[1]):
+                b.location = GeoPoint(lat=float(coords[1]), lng=float(coords[0]))
+                b.attributes["geo_source"] = "arcgis"
+                return True
+            return False
+        city = b.address.city if b.address else None
+        region = b.address.region if b.address else None
+        feat = photon_pick(b.name, city, region, features)
         if feat is None:
             return False
-        props = feat.get("properties") or {}
-        changed = False
-        coords = (feat.get("geometry") or {}).get("coordinates") or []
-        if b.location is None and len(coords) >= 2:
-            b.location = GeoPoint(lat=float(coords[1]), lng=float(coords[0]))
-            changed = True
-        cur = b.address or Address()
-        house, street = props.get("housenumber"), props.get("street")
-        line1 = " ".join(str(p) for p in (house, street) if p) or None
-        if line1 and not cur.line1:
-            cur.line1 = line1
-            changed = True
-        if props.get("city") and not cur.city:
-            cur.city = str(props["city"])
-            changed = True
-        if props.get("postcode") and not cur.postal_code:
-            cur.postal_code = str(props["postcode"])
-            changed = True
-        osm_type, osm_id = props.get("osm_type"), props.get("osm_id")
-        if osm_type and osm_id:
-            b.attributes["osm_type"] = str(osm_type)
-            b.attributes["osm_id"] = osm_id
+        score = float((feat.get("properties") or {}).get("score") or 0)
+        if score and score < ARCGIS_SCORE_MIN:
+            return False
+        changed = self._apply_osm_feature(b, feat)
         if changed:
-            b.address = cur
-            b.attributes["poi_source"] = "photon"
-        return bool(changed or osm_id)
-
-    async def _nominatim(self, b: Business) -> bool:
-        query = " ".join(p for p in (b.name, self._where(b)) if p).strip()
-        if not query:
-            return False
-        data = await self.http.get_json(
-            f"{self.settings.nominatim_url}/search",
-            params={
-                "q": query,
-                "format": "json",
-                "limit": 3,
-                "countrycodes": "us",
-                "addressdetails": 1,
-                "extratags": 1,
-            },
-            **self._fast(),
-        )
-        if not isinstance(data, list) or not data:
-            return False
-        target = normalize_name(b.name)
-        best: dict[str, Any] | None = None
-        best_score = 0.0
-        for row in data:
-            display = str(row.get("display_name") or row.get("name") or "")
-            score = float(fuzz.token_set_ratio(target, normalize_name(display.split(",")[0])))
-            if score > best_score:
-                best, best_score = row, score
-        if best is None or best_score < NOMINATIM_MATCH_THRESHOLD:
-            return False
-        extra = best.get("extratags") or {}
-        addr = best.get("address") or {}
-        changed = False
-        if not b.website:
-            site = extra.get("website") or extra.get("contact:website")
-            url = normalize_url(site) if site else None
-            if url and not is_social_or_directory_url(url):
-                b.website = url
-                b.domain = extract_domain(url)
-                b.attributes["website_source"] = "nominatim"
-                changed = True
-        if not b.phone_e164:
-            phone = extra.get("phone") or extra.get("contact:phone")
-            e164 = normalize_phone(phone) if phone else None
-            if e164:
-                b.phone_e164 = e164
-                changed = True
-        if b.location is None and best.get("lat") and best.get("lon"):
-            b.location = GeoPoint(lat=float(best["lat"]), lng=float(best["lon"]))
-            changed = True
-        cur = b.address or Address()
-        if not cur.line1:
-            house = addr.get("house_number")
-            street = addr.get("road")
-            line1 = " ".join(p for p in (house, street) if p) or None
-            if line1:
-                cur.line1 = line1
-                changed = True
-        if not cur.city and (addr.get("city") or addr.get("town") or addr.get("village")):
-            cur.city = addr.get("city") or addr.get("town") or addr.get("village")
-            changed = True
-        if not cur.region and addr.get("state"):
-            cur.region = addr.get("ISO3166-2-lvl4", "").split("-")[-1] or cur.region
-            changed = True
-        if not cur.postal_code and addr.get("postcode"):
-            cur.postal_code = addr.get("postcode")
-            changed = True
-        if changed:
-            b.address = cur
+            b.attributes["poi_source"] = "arcgis"
         return changed
 
-    async def _duckduckgo(self, b: Business) -> str | None:
+    async def _search_website(self, b: Business) -> tuple[str | None, str | None, str]:
         where = self._where(b)
         query = f"{b.name} {where} official website".strip()
         engines: list[tuple[str, str, str]] = [
+            ("bing", BING_URL, "bing"),
+            ("brave", BRAVE_URL, "html"),
+            ("yahoo", YAHOO_URL, "html"),
             ("duckduckgo", DDG_URL, "html"),
             ("duckduckgo", DDG_LITE_URL, "html"),
-            ("duckduckgo", DDG_API_URL, "api"),
-            ("bing", BING_URL, "bing"),
+            ("crtsh", CRTSH_URL, "crtsh"),
         ]
         for source, url, kind in engines:
             host = urlparse(url).netloc
-            if host:
-                self.http.set_host_rate(host, 1.0, concurrency=1)
             if host and not self.http.host_available(host):
                 continue
+            phones: dict[str, str] = {}
             try:
-                if kind == "api":
-                    resp = await self.http.get(
-                        url,
-                        params={"q": query, "format": "json", "no_html": "1", "skip_disambig": "1"},
-                        headers=DDG_HEADERS,
-                        **self._fast(),
-                    )
-                    payload = resp.json() if resp.status_code < 400 else {}
-                    urls = parse_ddg_api(payload if isinstance(payload, dict) else {})
-                elif kind == "bing":
+                if kind == "bing":
                     resp = await self.http.get(
                         url, params={"q": query}, headers=DDG_HEADERS, **self._fast()
                     )
-                    urls = parse_bing_html(resp.text if resp.status_code < 400 else "")
+                    rows = parse_bing_results(resp.text if resp.status_code < 400 else "")
+                    urls = [item[0] for item in rows]
+                    phones = {item[0]: item[1] for item in rows if item[1]}
+                elif kind == "crtsh":
+                    resp = await self.http.get(
+                        url, params={"q": b.name, "output": "json"}, **self._fast()
+                    )
+                    try:
+                        payload = resp.json() if resp.status_code < 400 else []
+                    except Exception:  # noqa: BLE001
+                        payload = []
+                    urls = parse_crtsh(payload if isinstance(payload, list) else [])
                 else:
+                    param = "p" if "yahoo.com" in host else "q"
                     resp = await self.http.get(
-                        url, params={"q": query}, headers=DDG_HEADERS, **self._fast()
+                        url, params={param: query}, headers=DDG_HEADERS, **self._fast()
                     )
                     if resp.status_code >= 400 or not resp.text:
                         continue
@@ -824,8 +1063,8 @@ class DirectoryDiscoverer:
             picked = pick_website(b.name, urls)
             if picked:
                 b.attributes["website_search"] = source
-                return picked
-        return None
+                return picked, phones.get(picked), source
+        return None, None, ""
 
 
 def completeness(b: Business) -> tuple[int, ...]:

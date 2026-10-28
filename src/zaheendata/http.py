@@ -233,9 +233,6 @@ class HttpClient:
     ):
         self.settings = settings or get_settings()
         s = self.settings
-        if transport is None:
-            # Prefer IPv4 so DuckDuckGo/Photon do not hang on a broken IPv6 path.
-            transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0")
         self._client = httpx.AsyncClient(
             headers={"User-Agent": s.user_agent, "Accept-Language": "en-US,en;q=0.9"},
             timeout=as_timeout(s.http_timeout_seconds),
@@ -253,6 +250,7 @@ class HttpClient:
         self._host_cooldown: dict[str, float] = {}
         self._429_streak: dict[str, int] = {}
         self._host_skip_until: dict[str, float] = {}
+        self._giveup_logged: set[str] = set()
         self._host_disabled: dict[str, str] = {}
 
     def set_host_rate(self, host: str, requests_per_second: float, concurrency: int | None = None) -> None:
@@ -289,6 +287,19 @@ class HttpClient:
             return
         self._host_disabled[host] = reason
         log.warning("http.host_paused", host=host, reason=reason)
+
+    def _note_giveup(self, host: str, url: str, exc: BaseException) -> None:
+        err = str(exc) or type(exc).__name__
+        if host not in self._giveup_logged:
+            self._giveup_logged.add(host)
+            log.warning(
+                "http.giveup",
+                url=redact_url(url),
+                error=err,
+                note="this host is skipped for the rest of the run; other sources continue",
+            )
+        else:
+            log.debug("http.giveup", url=redact_url(url), error=err)
 
     async def request(
         self,
@@ -338,43 +349,56 @@ class HttpClient:
             if cooldown > 0:
                 await asyncio.sleep(min(cooldown, 120))
             async with self._global, self._sem(host):
+                # Re-check after waiting in the queue: the first waiter may have just
+                # marked this host dead. Do not open 200 connections to a host that failed.
+                if self.is_paused(host):
+                    raise HostPaused(host, self._host_disabled[host])
+                skip_now = self._host_skip_until.get(host, 0)
+                if skip_now > time.monotonic():
+                    raise HostUnavailable(host, skip_now - time.monotonic())
                 await self._bucket(host).acquire()
                 req_timeout = as_timeout(timeout_seconds)
-                if max_bytes:
-                    stream_kw: dict[str, Any] = {
-                        "params": params,
-                        "json": json_body,
-                        "data": data,
-                        "headers": headers,
-                    }
-                    if req_timeout is not None:
-                        stream_kw["timeout"] = req_timeout
-                    async with self._client.stream(method, url, **stream_kw) as stream:
-                        chunks: list[bytes] = []
-                        size = 0
-                        async for chunk in stream.aiter_bytes():
-                            chunks.append(chunk)
-                            size += len(chunk)
-                            if size > max_bytes:
-                                break
-                        resp = httpx.Response(
-                            stream.status_code,
-                            headers=stream.headers,
-                            content=b"".join(chunks),
-                            request=stream.request,
-                        )
-                else:
-                    req_kw: dict[str, Any] = {
-                        "params": params,
-                        "json": json_body,
-                        "data": data,
-                        "headers": headers,
-                    }
-                    if files is not None:
-                        req_kw["files"] = files
-                    if req_timeout is not None:
-                        req_kw["timeout"] = req_timeout
-                    resp = await self._client.request(method, url, **req_kw)
+                try:
+                    if max_bytes:
+                        stream_kw: dict[str, Any] = {
+                            "params": params,
+                            "json": json_body,
+                            "data": data,
+                            "headers": headers,
+                        }
+                        if req_timeout is not None:
+                            stream_kw["timeout"] = req_timeout
+                        async with self._client.stream(method, url, **stream_kw) as stream:
+                            chunks: list[bytes] = []
+                            size = 0
+                            async for chunk in stream.aiter_bytes():
+                                chunks.append(chunk)
+                                size += len(chunk)
+                                if size > max_bytes:
+                                    break
+                            resp = httpx.Response(
+                                stream.status_code,
+                                headers=stream.headers,
+                                content=b"".join(chunks),
+                                request=stream.request,
+                            )
+                    else:
+                        req_kw: dict[str, Any] = {
+                            "params": params,
+                            "json": json_body,
+                            "data": data,
+                            "headers": headers,
+                        }
+                        if files is not None:
+                            req_kw["files"] = files
+                        if req_timeout is not None:
+                            req_kw["timeout"] = req_timeout
+                        resp = await self._client.request(method, url, **req_kw)
+                except httpx.TransportError:
+                    # DNS / connect failure will not recover mid-run. Skip now so waiters
+                    # behind this semaphore do not each spend a handshake on a dead host.
+                    self._host_skip_until[host] = time.monotonic() + 24 * 3600
+                    raise
             if 200 <= resp.status_code < 400:
                 self._429_streak[host] = 0
                 self._host_skip_until.pop(host, None)
@@ -396,7 +420,9 @@ class HttpClient:
             async for attempt in AsyncRetrying(
                 stop=stop_after_attempt(retries if retries is not None else self.settings.http_max_retries),
                 wait=wait_exponential_jitter(initial=1, max=60),
-                retry=retry_if_exception_type((RetryableHTTPError, httpx.TransportError)),
+                # Do not retry TransportError: a refused/timed-out host stays dead, and retries
+                # only stall the pool. Callers fail over to the next source instead.
+                retry=retry_if_exception_type(RetryableHTTPError),
                 reraise=False,
             ):
                 with attempt:
@@ -412,15 +438,19 @@ class HttpClient:
                         if exc.retry_after:
                             await asyncio.sleep(min(exc.retry_after, 120))
                         raise
+        except HostPaused:
+            raise
+        except HostUnavailable:
+            raise
+        except httpx.TransportError as exc:
+            self._host_skip_until[host] = time.monotonic() + 24 * 3600
+            self._note_giveup(host, url, exc)
+            raise
         except RetryError as exc:
             last = exc.last_attempt.exception()
-            log.warning("http.giveup", url=redact_url(url), error=str(last) or type(last).__name__)
-            # Timeouts and 503s must not pause the host for the rest of the campaign — that
-            # dropped the remaining companies. Skip this host briefly and keep going.
-            if isinstance(last, httpx.TransportError) or (
-                isinstance(last, RetryableHTTPError) and last.status in {408, 502, 503, 504}
-            ):
+            if isinstance(last, RetryableHTTPError) and last.status in {408, 502, 503, 504}:
                 self._host_skip_until[host] = time.monotonic() + 20.0
+            self._note_giveup(host, url, last or exc)
             raise last if last else exc
 
         if meter:

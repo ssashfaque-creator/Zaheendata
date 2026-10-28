@@ -36,6 +36,29 @@ class FixtureTransport(httpx.AsyncBaseTransport):
             return httpx.Response(
                 200, content=b'{"features":[]}', headers={"content-type": "application/json"}
             )
+        if "geocode.arcgis.com" in host:
+            body = json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "address": "Austin, Texas",
+                            "location": {"x": self.geocode[1], "y": self.geocode[0]},
+                            "score": 100,
+                            "attributes": {
+                                "PlaceName": "",
+                                "City": "Austin",
+                                "Region": "Texas",
+                                "RegionAbbr": "TX",
+                                "Subregion": "Travis County",
+                                "Postal": "78701",
+                            },
+                        }
+                    ]
+                }
+            )
+            return httpx.Response(
+                200, content=body.encode(), headers={"content-type": "application/json"}
+            )
         if "geocoding.geo.census.gov" in host:
             if "addressbatch" in path:
                 return httpx.Response(200, content=b"", headers={"content-type": "text/csv"})
@@ -52,8 +75,10 @@ class FixtureTransport(httpx.AsyncBaseTransport):
                     headers={"content-type": "application/json"},
                 )
             return httpx.Response(200, content=b"<html></html>", headers={"content-type": "text/html"})
-        if host in {"www.bing.com", "bing.com"}:
+        if host in {"www.bing.com", "bing.com", "search.brave.com", "search.yahoo.com"}:
             return httpx.Response(200, content=b"<html></html>", headers={"content-type": "text/html"})
+        if host == "crt.sh":
+            return httpx.Response(200, content=b"[]", headers={"content-type": "application/json"})
         if "maps.googleapis.com" in host and path.endswith("/geocode/json"):
             body = json.dumps(
                 {"results": [{"geometry": {"location": {"lat": self.geocode[0], "lng": self.geocode[1]}}}]}

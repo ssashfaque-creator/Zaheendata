@@ -361,7 +361,7 @@ class CampaignRunner:
             "enrich.start",
             total=len(candidates),
             discover_budget=budget,
-            note="census batch, then OSM, then crawl known sites while DuckDuckGo fills the rest",
+            note="census + Overpass + ArcGIS, then crawl known sites while search engines fill the rest",
         )
         beat_stop = asyncio.Event()
 
@@ -413,32 +413,40 @@ class CampaignRunner:
             geocoded = await discoverer.geocode_batch(candidates)
             await self._emit("enrich.phase", phase="census_batch", geocoded=geocoded)
 
-            phase[0] = "photon"
-            photon_targets = [
-                b
-                for b in candidates
-                if not b.website
-                or not b.phone_e164
-                or not (b.address and b.address.line1)
-                or b.location is None
-            ]
-            photon_n = await discoverer.fill_osm_many(photon_targets)
-            await self._emit("enrich.phase", phase="photon", filled=photon_n)
+            phase[0] = "osm"
+            located = [b.location for b in candidates if b.location]
+            if located:
+                center = GeoPoint(
+                    lat=sum(p.lat for p in located) / len(located),
+                    lng=sum(p.lng for p in located) / len(located),
+                )
+            else:
+                center = next((c.center for c in ctx.cells if c.center.lat or c.center.lng), None)
+            if center is None or not (center.lat or center.lng):
+                center = await discoverer.geocode_place(discoverer.fallback_where)
+            osm_n = 0
+            if center and ctx.subsector.osm_tags:
+                osm_n = await discoverer.match_overpass(
+                    candidates,
+                    ctx.subsector.osm_tags,
+                    center.lat,
+                    center.lng,
+                    ctx.campaign.spec.geography.radius_km,
+                )
+            await self._emit("enrich.phase", phase="osm", filled=osm_n)
 
-            phase[0] = "osm_contacts"
-            osm_n = await discoverer.apply_osm_contacts(candidates)
-            await self._emit("enrich.phase", phase="osm_contacts", filled=osm_n)
+            phase[0] = "arcgis"
+            arcgis_n = await discoverer.fill_arcgis_many(candidates)
+            await self._emit("enrich.phase", phase="arcgis", filled=arcgis_n)
 
             known = [b for b in candidates if b.website]
-            unknown = [b for b in candidates if not b.website][:budget]
-            skip_ids = {b.id for b in known} | {b.id for b in unknown}
-            leftover = [b for b in candidates if b.id not in skip_ids]
+            unknown = [b for b in candidates if not b.website]
             phase[0] = "crawl_and_search"
             await self._emit(
                 "enrich.phase",
                 phase="crawl_and_search",
                 crawl_now=len(known),
-                duckduckgo=len(unknown),
+                search=len(unknown),
             )
 
             async def discover_web(b: Business) -> None:
@@ -451,7 +459,6 @@ class CampaignRunner:
             await asyncio.gather(
                 *(crawl_one(b) for b in known),
                 *(discover_web(b) for b in unknown),
-                *(persist(b) for b in leftover),
             )
         finally:
             beat_stop.set()
