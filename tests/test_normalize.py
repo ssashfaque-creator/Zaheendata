@@ -1,5 +1,6 @@
 from zaheendata.normalize import (
     is_own_website,
+    is_usable_email,
     looks_like_company,
     looks_like_person,
     name_similarity,
@@ -20,6 +21,8 @@ def test_person_vs_company() -> None:
     assert looks_like_person("Jane Plumber")
     assert looks_like_person("CHARLES RAY WILKS")
     assert looks_like_person("CHRIS B NEMEC")
+    assert not looks_like_person("Malco Electric")
+    assert not looks_like_person("Lighting Installation")
     assert not looks_like_person("At Brooks Custom")
     assert not looks_like_person("Support Filters Warranty")
     assert not looks_like_person("Intelligent Air Services, Llc")
@@ -28,6 +31,13 @@ def test_person_vs_company() -> None:
 
 def test_person_display_flips_last_first() -> None:
     assert person_display_name("BURGOS, DAVID") == "David Burgos"
+
+
+def test_placeholder_emails_are_not_usable() -> None:
+    assert is_usable_email("chuck@chucksac.com")
+    assert not is_usable_email("user@domain.com")
+    assert not is_usable_email("email@domain.com")
+    assert not is_usable_email("you@email.com")
 
 
 def test_directory_hosts_are_not_own_sites() -> None:

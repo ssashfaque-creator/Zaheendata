@@ -11,6 +11,7 @@ from zaheendata.normalize import (
     domain_from_url,
     email_is_role_account,
     is_own_website,
+    is_usable_email,
     distinctive_name_key,
     looks_like_person,
     name_key,
@@ -170,7 +171,7 @@ def places_to_leads(
             name=data.get("name") or "",
             phone=normalize_phone(data.get("phone")),
             website=website,
-            owner_email=data.get("email") or "",
+            owner_email=(data.get("email") or "") if is_usable_email(data.get("email") or "") else "",
             email_is_role_account=email_is_role_account(data.get("email") or ""),
             address=data.get("address") or "",
             city=data.get("city") or "",
@@ -231,7 +232,7 @@ def attach_warehouse_overlays(leads: list[Lead], warehouse: Path | None = None) 
             lead.license_number = lic[3] or lead.license_number
             lead.license_status = lic[4] or lead.license_status
             owner = person_display_name(lic[1]) if lic[1] else ""
-            if lic[2] or looks_like_person(owner) or looks_like_person(lic[1]):
+            if looks_like_person(owner) or looks_like_person(lic[1]):
                 lead.owner_name = owner or lead.owner_name
                 lead.owner_source = lic[7] or "license"
                 lead.owner_confidence = 0.8

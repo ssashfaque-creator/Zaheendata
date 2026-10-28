@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from zaheendata.models import Lead
-from zaheendata.normalize import looks_like_person
+from zaheendata.normalize import is_usable_email, looks_like_person
 from zaheendata.subsectors import Subsector
 
 def _int(value: object) -> int:
@@ -54,7 +54,7 @@ def score_multi_tool(lead: Lead) -> tuple[int, str]:
 
 def score_owner(lead: Lead) -> tuple[int, str]:
     person = looks_like_person(lead.owner_name)
-    has_email = bool(lead.owner_email)
+    has_email = is_usable_email(lead.owner_email)
     if person and has_email:
         return 2, f"owner named {lead.owner_name} with email {lead.owner_email} ({lead.owner_source or 'unknown'})"
     if person:

@@ -48,6 +48,9 @@ ROLE_LOCALS = {
     "quote",
 }
 
+PLACEHOLDER_EMAIL_LOCALS = {"user", "email", "you", "name", "test", "noreply", "no-reply", "username"}
+PLACEHOLDER_EMAIL_HOSTS = {"domain.com", "email.com", "yourdomain.com", "example.com", "sentry.io"}
+
 
 def fold(value: str | None) -> str:
     text = unicodedata.normalize("NFKD", value or "")
@@ -97,6 +100,16 @@ PERSON_STOPWORDS = {
     "warranty",
     "services",
     "service",
+    "electric",
+    "electrical",
+    "lighting",
+    "installation",
+    "contracting",
+    "contractor",
+    "company",
+    "generators",
+    "inc",
+    "llc",
 }
 
 
@@ -197,9 +210,26 @@ def canonicalize_website(value: str | None) -> str:
     return f"{scheme}://{netloc}{path}/"
 
 
+def email_is_placeholder(email: str | None) -> bool:
+    raw = (email or "").strip().lower()
+    if "@" not in raw:
+        return True
+    local, _, host = raw.partition("@")
+    if local in PLACEHOLDER_EMAIL_LOCALS:
+        return True
+    return host in PLACEHOLDER_EMAIL_HOSTS or host.endswith(".png")
+
+
 def email_is_role_account(email: str | None) -> bool:
     local = (email or "").split("@", 1)[0].lower()
     return local in ROLE_LOCALS or local.endswith("office")
+
+
+def is_usable_email(email: str | None) -> bool:
+    raw = (email or "").strip()
+    if not raw or "@" not in raw or email_is_placeholder(raw):
+        return False
+    return True
 
 
 def token_set(value: str | None) -> set[str]:

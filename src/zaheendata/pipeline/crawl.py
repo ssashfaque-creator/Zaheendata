@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup
 
 from zaheendata.fingerprints import detect_tools, summarize_tools
 from zaheendata.models import Lead
-from zaheendata.normalize import canonicalize_website, email_is_role_account, looks_like_person
+from zaheendata.normalize import canonicalize_website, email_is_role_account, is_usable_email, looks_like_person
 
 USER_AGENT = "ZaheendataLeadResearch/0.1 (+https://github.com/ssashfaque-creator/Zaheendata)"
 EMAIL_RE = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.I)
@@ -64,7 +64,7 @@ def extract_signals(html: str, url: str) -> dict:
     text = _visible_text(soup)
     blob = _blob(html, text)
     emails = sorted({match.group(0).lower() for match in EMAIL_RE.finditer(html) if not match.group(0).lower().endswith((".png", ".jpg", ".webp", ".svg"))})
-    emails = [email for email in emails if "example.com" not in email and "sentry" not in email]
+    emails = [email for email in emails if is_usable_email(email)]
     summary = summarize_tools(detect_tools(blob))
     booking = summary["booking_provider"]
     store = summary["store_platform"]
