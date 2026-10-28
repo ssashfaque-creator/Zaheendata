@@ -285,21 +285,22 @@ async def _fetch(client: httpx.AsyncClient, url: str) -> str:
         return ""
 
 
-async def crawl_lead(client: httpx.AsyncClient, lead: Lead, semaphore: asyncio.Semaphore) -> Lead:
+async def crawl_lead(client: httpx.AsyncClient, lead: Lead) -> Lead:
     if not lead.website:
         return lead
-    async with semaphore:
-        html = await _fetch(client, lead.website)
-        if not html:
-            lead.website_crawled = False
-            return lead
-        combined = extract_signals(html, lead.website)
-        for child in combined.get("child_links", [])[: MAX_PAGES - 1]:
-            child_html = await _fetch(client, child)
-            if child_html:
-                merge_signals(combined, extract_signals(child_html, child))
-        apply_signals(lead, combined)
+    html = await _fetch(client, lead.website)
+    if not html:
+        lead.website_crawled = False
+        lead.extra["crawl_attempted"] = True
         return lead
+    combined = extract_signals(html, lead.website)
+    for child in combined.get("child_links", [])[: MAX_PAGES - 1]:
+        child_html = await _fetch(client, child)
+        if child_html:
+            merge_signals(combined, extract_signals(child_html, child))
+    apply_signals(lead, combined)
+    lead.extra["crawl_attempted"] = True
+    return lead
 
 
 async def crawl_leads(
@@ -307,15 +308,31 @@ async def crawl_leads(
     *,
     concurrency: int = 8,
     on_html: Callable[[Lead, str], None] | None = None,
+    on_lead: Callable[[Lead], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> list[Lead]:
     if not leads:
         return leads
     semaphore = asyncio.Semaphore(concurrency)
+    lock = asyncio.Lock()
     headers = {"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"}
+
+    async def _one(lead: Lead) -> Lead:
+        if should_stop and should_stop():
+            return lead
+        async with semaphore:
+            if should_stop and should_stop():
+                return lead
+            await crawl_lead(client, lead)
+        html = lead.extra.get("_html", "")
+        async with lock:
+            if on_html and html:
+                on_html(lead, html)
+            if on_lead:
+                on_lead(lead)
+            lead.extra.pop("_html", None)
+        return lead
+
     async with httpx.AsyncClient(headers=headers, http2=False) as client:
-        await asyncio.gather(*(crawl_lead(client, lead, semaphore) for lead in leads))
-    for lead in leads:
-        html = lead.extra.pop("_html", "")
-        if on_html and html:
-            on_html(lead, html)
+        await asyncio.gather(*(_one(lead) for lead in leads))
     return leads

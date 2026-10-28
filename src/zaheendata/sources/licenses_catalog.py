@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from zaheendata.checkpoint import atomic_write_json, json_records_ready
 from zaheendata.sources import tdlr
 
 
@@ -77,19 +78,26 @@ FEEDS: tuple[LicenseFeed, ...] = (
 )
 
 
-def download_soda_feed(feed: LicenseFeed, out: Path, county: str | None = None) -> Path:
+def download_soda_feed(
+    feed: LicenseFeed,
+    out: Path,
+    county: str | None = None,
+    *,
+    refetch: bool = False,
+    max_rows: int = 150_000,
+) -> Path:
+    if not refetch and json_records_ready(out):
+        return out
     mapping = {
         "tx_tdlr_ac": "tdlr_ac_contractor",
         "tx_tdlr_electrical": "tdlr_electrical_contractor",
         "tx_tdlr_salon": "tdlr_cosmetology_establishment",
     }
     filt = tdlr.LICENSE_FILTERS[mapping[feed.key]]
-    rows = tdlr.fetch_licenses(license_filter=filt, county=county)
+    rows = tdlr.fetch_licenses(license_filter=filt, county=county, max_rows=max_rows)
     records = list(tdlr.iter_match_records(rows, feed.key))
     out.parent.mkdir(parents=True, exist_ok=True)
-    import json
-
-    out.write_text(json.dumps(records), encoding="utf-8")
+    atomic_write_json(out, records)
     return out
 
 
@@ -100,3 +108,7 @@ def list_feeds(state: str | None = None, subsector: str | None = None) -> list[L
     if subsector:
         feeds = [feed for feed in feeds if subsector in feed.subsectors]
     return feeds
+
+
+def soda_source_keys(state: str | None = None, subsector: str | None = None) -> set[str]:
+    return {feed.key for feed in list_feeds(state=state, subsector=subsector) if feed.kind == "soda"}

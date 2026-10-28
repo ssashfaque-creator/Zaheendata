@@ -16,3 +16,12 @@ def test_parser_exposes_download_first_commands() -> None:
     assert stats.command == "stats"
     doctor = parser.parse_args(["doctor"])
     assert doctor.command == "doctor"
+
+    harvest = parser.parse_args(["harvest", "--geo", "TX", "--fresh", "--crawl", "none"])
+    assert harvest.command == "harvest"
+    assert harvest.geo == "TX"
+    assert harvest.fresh is True
+    assert harvest.crawl == "none"
+
+    reset = parser.parse_args(["reset"])
+    assert reset.command == "reset"

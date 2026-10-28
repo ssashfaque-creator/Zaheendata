@@ -184,6 +184,28 @@ def connect(path: Path | None = None, *, remote: bool = False) -> duckdb.DuckDBP
     return con
 
 
+def reset_warehouse(path: Path | None = None) -> Path:
+    target = path or Path("data/warehouse.duckdb")
+    for candidate in (target, Path(str(target) + ".wal"), Path(str(target) + ".tmp")):
+        if candidate.exists():
+            candidate.unlink()
+    return target
+
+
+def snapshot_domains(path: Path | None = None, *, successful_only: bool = False) -> set[str]:
+    con = connect(path)
+    try:
+        sql = "SELECT DISTINCT domain FROM snapshots WHERE domain IS NOT NULL AND domain <> ''"
+        if successful_only:
+            sql += " AND status = 200"
+        rows = con.execute(sql).fetchall()
+    except duckdb.Error:
+        rows = []
+    finally:
+        con.close()
+    return {str(row[0]).lower() for row in rows if row[0]}
+
+
 def warehouse_stats(path: Path | None = None) -> dict:
     con = connect(path)
     def _count(table: str) -> int:

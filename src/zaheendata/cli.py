@@ -24,7 +24,7 @@ from zaheendata.pipeline.score import rank_leads, score_lead
 from zaheendata.sources.licenses_catalog import FEEDS, list_feeds
 from zaheendata.sources.overture import OVERTURE_RELEASE, probe_places
 from zaheendata.subsectors import SUBSECTORS, get_subsector
-from zaheendata.warehouse import warehouse_stats
+from zaheendata.warehouse import reset_warehouse, warehouse_stats
 
 
 def _load_dotenv(path: Path) -> None:
@@ -62,6 +62,39 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--concurrency", type=int, default=8)
     build.add_argument("--licenses", action="store_true", help="Also download matching SODA license feeds.")
     build.add_argument("--ppp", action="store_true", help="Overlay SBA PPP jobs_reported (size proxy, not discovery).")
+
+    harvest_cmd = sub.add_parser(
+        "harvest",
+        help="Resumable statewide pull for every trade. Ctrl+C saves; rerun the same command to continue.",
+    )
+    harvest_cmd.add_argument("--geo", default="TX", help="State code (TX) or US. Default TX.")
+    harvest_cmd.add_argument(
+        "--subsector",
+        nargs="*",
+        choices=sorted(SUBSECTORS),
+        help="Default: all 17 trades. Pass one or more to restrict.",
+    )
+    harvest_cmd.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Delete the warehouse and harvest_state.json first. Keeps downloaded parquets.",
+    )
+    harvest_cmd.add_argument(
+        "--refetch",
+        action="store_true",
+        help="Re-download Overture and license files even if they already exist.",
+    )
+    harvest_cmd.add_argument("--warehouse", type=Path, default=None)
+    harvest_cmd.add_argument("--raw-dir", type=Path, default=Path("data/raw"))
+    harvest_cmd.add_argument("--out-dir", type=Path, default=Path("data/exports"))
+    harvest_cmd.add_argument("--keep", type=int, default=100)
+    harvest_cmd.add_argument("--limit", type=int, help="Cap enrichable sites per trade (smoke test).")
+    harvest_cmd.add_argument("--crawl", default="live", help="live or none.")
+    harvest_cmd.add_argument("--concurrency", type=int, default=4)
+
+    reset = sub.add_parser("reset", help="Delete the DuckDB warehouse. Downloaded files are kept.")
+    reset.add_argument("--warehouse", type=Path, default=None)
+    reset.add_argument("--state", type=Path, default=Path("data/harvest_state.json"))
 
     download = sub.add_parser("download", help="Bulk-download a free source before scoring.")
     download.add_argument("source", choices=("places", "ppp", "licenses"))
@@ -300,6 +333,32 @@ def main(argv: list[str] | None = None) -> int:
         for feed in feeds:
             print(f"{feed.key:22} {','.join(feed.states):8} {feed.kind:8} {feed.url}")
             print(f"{'':22} {feed.notes}")
+        return 0
+    if args.command == "reset":
+        path = reset_warehouse(_warehouse(args))
+        if args.state.exists():
+            args.state.unlink()
+        print(json.dumps({"reset": str(path), "state": str(args.state)}, indent=2))
+        return 0
+    if args.command == "harvest":
+        from zaheendata.pipeline.harvest import harvest
+
+        if args.warehouse is None:
+            args.warehouse = _default_warehouse()
+        summary = harvest(
+            geo=args.geo,
+            subsector_keys=args.subsector,
+            warehouse=args.warehouse,
+            raw_dir=args.raw_dir,
+            out_dir=args.out_dir,
+            keep=args.keep,
+            limit=args.limit,
+            crawl=args.crawl,
+            concurrency=args.concurrency,
+            fresh=args.fresh,
+            refetch=args.refetch,
+        )
+        print(json.dumps(summary, indent=2, default=str))
         return 0
     if args.command == "stats":
         print(json.dumps(warehouse_stats(_warehouse(args)), indent=2, default=str))

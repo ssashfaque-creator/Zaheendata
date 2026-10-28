@@ -8,6 +8,20 @@ import duckdb
 from zaheendata.geo import resolve_bbox
 from zaheendata.subsectors import SUBSECTORS, Subsector, get_subsector
 
+
+def parquet_file_ready(path: Path) -> bool:
+    if not path.exists() or path.stat().st_size < 64:
+        return False
+    con = duckdb.connect()
+    try:
+        count = con.execute("SELECT count(*) FROM read_parquet(?)", [path.as_posix()]).fetchone()[0]
+        return int(count) > 0
+    except duckdb.Error:
+        return False
+    finally:
+        con.close()
+
+
 OVERTURE_RELEASE = os.environ.get("OVERTURE_RELEASE", "2026-10-21.0")
 PLACES_GLOB = (
     f"s3://overturemaps-us-west-2/release/{OVERTURE_RELEASE}/theme=places/type=place/*"
@@ -27,7 +41,10 @@ def download_places(
     out: Path,
     limit: int | None = None,
     connection: duckdb.DuckDBPyConnection | None = None,
+    refetch: bool = False,
 ) -> Path:
+    if not refetch and parquet_file_ready(out):
+        return out
     west, south, east, north = resolve_bbox(geo)
     specs = [get_subsector(subsector_key)] if subsector_key else list(SUBSECTORS.values())
     categories = _category_sql(specs)
@@ -43,6 +60,10 @@ def download_places(
             naics_sql += f"WHEN '{label}' THEN '{spec.naics}' "
     naics_sql += "ELSE '' END AS naics "
 
+    out.parent.mkdir(parents=True, exist_ok=True)
+    partial = Path(str(out) + ".partial")
+    if partial.exists():
+        partial.unlink()
     sql = f"""
     COPY (
       SELECT
@@ -74,9 +95,8 @@ def download_places(
         AND coalesce(operating_status, 'open') <> 'permanently_closed'
         AND taxonomy.primary IN ({categories})
       {limit_sql}
-    ) TO '{out.as_posix()}' (FORMAT PARQUET)
+    ) TO '{partial.as_posix()}' (FORMAT PARQUET)
     """
-    out.parent.mkdir(parents=True, exist_ok=True)
     owned = connection is None
     con = connection or duckdb.connect()
     try:
@@ -84,6 +104,15 @@ def download_places(
             con.execute("INSTALL httpfs; LOAD httpfs;")
             con.execute("SET s3_region='us-west-2';")
         con.execute(sql)
+        if partial.exists():
+            os.replace(partial, out)
+    except Exception:
+        if partial.exists():
+            try:
+                partial.unlink()
+            except OSError:
+                pass
+        raise
     finally:
         if owned:
             con.close()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 import httpx
 
@@ -11,7 +12,7 @@ from zaheendata.fingerprints import detect_tools, summarize_tools
 from zaheendata.models import Lead
 from zaheendata.pipeline.crawl import apply_signals, crawl_leads, extract_signals
 from zaheendata.sources.commoncrawl import latest_crawl_id, snapshot_domain
-from zaheendata.warehouse import connect
+from zaheendata.warehouse import connect, snapshot_domains
 
 
 def _record_snapshot(con, lead: Lead, source: str, html: str, cache_path: str) -> None:
@@ -38,6 +39,22 @@ def _record_snapshot(con, lead: Lead, source: str, html: str, cache_path: str) -
             "INSERT INTO technologies VALUES (?, ?, ?, ?, ?)",
             [[lead.domain, row["name"], row["category"], row["evidence"], source] for row in matches],
         )
+
+
+def checkpoint_live_lead(lead: Lead, warehouse: Path | None) -> None:
+    html = lead.extra.pop("_html", "")
+    lead.merge_source("live_crawl")
+    if warehouse is None:
+        return
+    con = connect(warehouse)
+    try:
+        _record_snapshot(con, lead, "live_crawl", html, "")
+        con.execute("CHECKPOINT")
+    finally:
+        con.close()
+    from zaheendata.pipeline.build import persist_leads
+
+    persist_leads([lead], warehouse)
 
 
 def enrich_commoncrawl(
@@ -81,22 +98,40 @@ def enrich_live(
     warehouse: Path | None = None,
     concurrency: int = 8,
     only_missing: bool = True,
+    should_stop: Callable[[], bool] | None = None,
+    on_progress: Callable[[Lead], None] | None = None,
 ) -> list[Lead]:
-    targets = [
-        lead
-        for lead in leads
-        if lead.website and (not only_missing or not lead.website_crawled)
-    ]
-    con = connect(warehouse)
+    attempted = snapshot_domains(warehouse) if warehouse is not None else set()
+    successful = (
+        snapshot_domains(warehouse, successful_only=True) if warehouse is not None else set()
+    )
+    targets = []
+    for lead in leads:
+        if not lead.website:
+            continue
+        domain = (lead.domain or "").lower()
+        if domain in successful:
+            lead.website_crawled = True
+            lead.extra["crawl_attempted"] = True
+        elif domain in attempted:
+            lead.extra["crawl_attempted"] = True
+        if only_missing and (lead.website_crawled or domain in attempted):
+            continue
+        targets.append(lead)
 
-    def on_html(lead: Lead, html: str) -> None:
-        lead.merge_source("live_crawl")
-        _record_snapshot(con, lead, "live_crawl", html, "")
+    def on_lead(lead: Lead) -> None:
+        if on_progress:
+            on_progress(lead)
+        checkpoint_live_lead(lead, warehouse)
 
-    try:
-        asyncio.run(crawl_leads(targets, concurrency=concurrency, on_html=on_html))
-    finally:
-        con.close()
+    asyncio.run(
+        crawl_leads(
+            targets,
+            concurrency=concurrency,
+            on_lead=on_lead,
+            should_stop=should_stop,
+        )
+    )
     return leads
 
 

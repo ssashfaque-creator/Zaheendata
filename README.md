@@ -36,14 +36,55 @@ Directory hosts (HomeAdvisor, Angi, Yelp, Facebook, `business.site`, …) are no
 
 ## Setup
 
+On a Mac, without git:
+
 ```bash
+curl -L https://github.com/ssashfaque-creator/Zaheendata/archive/refs/heads/main.zip -o zaheendata.zip
+unzip zaheendata.zip
+cd Zaheendata-main
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
-cp .env.example .env
+pip install -e .
 ```
 
-No API key is required for `download` / `build` on Overture. DuckDB talks to the public S3 bucket with `httpfs`.
+If `main` does not yet have harvest, use the branch zip instead:
+
+```bash
+curl -L https://github.com/ssashfaque-creator/Zaheendata/archive/refs/heads/cursor/texas-statewide-harvest-aa83.zip -o zaheendata.zip
+unzip zaheendata.zip
+cd Zaheendata-cursor-texas-statewide-harvest-aa83
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+No API key is required for `download` / `build` / `harvest` on Overture. DuckDB talks to the public S3 bucket with `httpfs`. Keep the laptop awake with `caffeinate` (shown below) so a long harvest is not suspended.
+
+## Texas statewide harvest (all 17 trades)
+
+One command. It checkpoints after **every website** and after each download/ingest step. Press Ctrl+C whenever you want; the next run of the **same command without `--fresh`** continues from the last saved site.
+
+```bash
+# First run — wipe the warehouse, keep any already-downloaded parquets
+caffeinate -dims zaheendata harvest --geo TX --fresh
+
+# Stop anytime with Ctrl+C, then continue:
+caffeinate -dims zaheendata harvest --geo TX
+
+# Watch progress in another terminal
+tail -f data/harvest.log
+zaheendata stats
+```
+
+Do **not** pass `--fresh` when resuming. That flag deletes `data/warehouse.duckdb` and `data/harvest_state.json` (downloaded files in `data/raw/` stay). `--refetch` is the only way to re-download Overture/licenses.
+
+Smoke-test with a handful of sites per trade before the full crawl:
+
+```bash
+zaheendata harvest --geo TX --limit 5
+```
+
+Exports land in `data/exports/TX_<trade>.csv`. The DuckDB warehouse is the source of truth if a run is interrupted mid-file.
 
 ## Commands
 
