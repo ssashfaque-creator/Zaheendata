@@ -7,7 +7,7 @@ import httpx
 import pytest
 import respx
 
-from zaheendata.http import HttpClient, ResponseCache
+from zaheendata.http import HostPaused, HttpClient, ResponseCache, RetryableHTTPError, parse_retry_after
 from zaheendata.models import GeoPoint, SourceKind, SourceSearchSpec
 from zaheendata.registry import get_registry
 from zaheendata.settings import get_settings
@@ -117,6 +117,13 @@ async def test_google_places_pagination_and_cache(monkeypatch: pytest.MonkeyPatc
     await http.aclose()
 
 
+def test_parse_retry_after():
+    assert parse_retry_after(None) is None
+    assert parse_retry_after("0") == 0.0
+    assert parse_retry_after("30") == 30.0
+    assert parse_retry_after("nope") is None
+
+
 @respx.mock
 async def test_http_client_retries_on_429(tmp_path: Path):
     settings = get_settings()
@@ -133,6 +140,28 @@ async def test_http_client_retries_on_429(tmp_path: Path):
     assert await http.get_json("https://api.example.com/x") == {"ok": True}
     assert attempts["n"] == 3
     await http.aclose()
+
+
+@respx.mock
+async def test_http_pauses_host_after_repeated_429(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("ZAHEEN_HTTP_MAX_RETRIES", "2")
+    get_settings.cache_clear()
+    settings = get_settings()
+    respx.get("https://places.googleapis.com/v1/places:searchText").mock(
+        return_value=httpx.Response(429, headers={"retry-after": "0"})
+    )
+    http = HttpClient(settings, cache=ResponseCache(tmp_path / "c.sqlite", 100))
+    try:
+        with pytest.raises(RetryableHTTPError):
+            await http.get("https://places.googleapis.com/v1/places:searchText")
+        with pytest.raises(RetryableHTTPError):
+            await http.get("https://places.googleapis.com/v1/places:searchText")
+        with pytest.raises(HostPaused):
+            await http.get("https://places.googleapis.com/v1/places:searchText")
+        assert http.is_paused("places.googleapis.com")
+    finally:
+        await http.aclose()
+        get_settings.cache_clear()
 
 
 def test_csv_auto_mapping_registry_extract_style():

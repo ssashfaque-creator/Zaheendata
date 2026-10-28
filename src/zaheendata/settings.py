@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     global_concurrency: int = 16
     per_host_concurrency: int = 2
     per_host_requests_per_second: float = 1.0
+    google_places_requests_per_second: float = Field(
+        default=0.35,
+        description="Places API (New) QPS. Default stays under Google's 60 QPM starter quota.",
+    )
     respect_robots_txt: bool = True
     website_max_pages: int = 6
     website_max_bytes: int = 2_000_000

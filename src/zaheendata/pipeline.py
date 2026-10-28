@@ -26,7 +26,7 @@ from .enrich import OwnerEnricher, ReviewAnalyzer, TechStackDetector, WebsiteCra
 from .enrich.owner import OwnerLookup
 from .filters import PoorFitFilter
 from .geo import AreaMatcher, Geocoder, GeoPlanner, SearchCell
-from .http import HttpClient
+from .http import HostPaused, HttpClient
 from .logging import get_logger
 from .models import (
     Business,
@@ -297,11 +297,24 @@ class CampaignRunner:
         sem = asyncio.Semaphore(self.settings.global_concurrency)
         done = 0
         matched = 0
+        maps_attempts = 0
+        maps_budget = self.settings.long_list_target * 2
+        places_host = "places.googleapis.com"
 
         async def enrich_one(b: Business) -> None:
-            nonlocal done, matched
+            nonlocal done, matched, maps_attempts
             async with sem:
-                if places is not None and self._needs_maps_match(b) and await self._match_maps(b, places):
+                do_match = False
+                if places is not None and self._needs_maps_match(b):
+                    if self.http.is_paused(places_host):
+                        ctx.stats["maps_rate_limited"] = True
+                        b.attributes.setdefault("maps_match", "rate_limited")
+                    elif maps_attempts < maps_budget:
+                        maps_attempts += 1
+                        do_match = True
+                    else:
+                        b.attributes.setdefault("maps_match", "budget")
+                if do_match and places is not None and await self._match_maps(b, places):
                     matched += 1
                 await self._enrich_business(b, places)
             done += 1
@@ -312,11 +325,23 @@ class CampaignRunner:
         await asyncio.gather(*(enrich_one(b) for b in candidates))
         # Second filter pass: website-derived franchise signals, refreshed review counts and the
         # website / review rules for registry records that have now been matched (or not) to Maps.
+        # Records we never looked up (quota / budget) stay deferred so "no website" does not wipe them.
         area = AreaMatcher(ctx.campaign.spec.geography, ctx.cells)
+        pending_maps = {
+            b.id
+            for b in businesses
+            if b.status != BusinessStatus.REJECTED
+            and self._needs_maps_match(b)
+            and b.attributes.get("maps_match") not in {"matched", "none"}
+        }
+        ctx.stats["maps_match_incomplete"] = len(pending_maps)
         require_reviews = self._review_filter_enabled(ctx, businesses)
         require_website = self._website_filter_enabled(ctx, businesses)
         reasons = PoorFitFilter(area, self.settings).apply(
-            businesses, require_website=require_website, require_reviews=require_reviews
+            businesses,
+            require_website=require_website,
+            require_reviews=require_reviews,
+            deferred=pending_maps or None,
         )
         await self.db.upsert_businesses(businesses)
         remaining = sum(1 for b in businesses if b.status != BusinessStatus.REJECTED)
@@ -337,6 +362,9 @@ class CampaignRunner:
                 addr.region if addr else None,
                 addr.postal_code if addr else None,
             )
+        except HostPaused:
+            b.attributes["maps_match"] = "rate_limited"
+            return False
         except Exception as exc:  # noqa: BLE001
             log.debug("enrich.maps_match_failed", business=b.name, error=str(exc)[:200])
             return False

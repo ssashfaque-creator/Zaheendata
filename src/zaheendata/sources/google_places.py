@@ -17,7 +17,7 @@ from ..logging import get_logger
 from ..models import Address, GeoPoint, RawRecord, Review, SourceKind, SourceSearchSpec
 from ..normalize import normalize_name
 from ..settings import Settings
-from .base import Source
+from .base import Source, SourceContext
 
 log = get_logger(__name__)
 
@@ -94,6 +94,12 @@ class GooglePlacesSource(Source):
     description = "Google Places API (New) text search + place details (reviews, newest first)."
     trust = 80
     always_on = True
+
+    def __init__(self, ctx: SourceContext) -> None:
+        super().__init__(ctx)
+        rps = max(0.05, self.settings.google_places_requests_per_second)
+        self.http.set_host_rate("places.googleapis.com", rps, concurrency=1)
+        self.http.set_host_rate("maps.googleapis.com", min(rps * 2, 1.0), concurrency=1)
 
     @classmethod
     def available(cls, settings: Settings) -> bool:

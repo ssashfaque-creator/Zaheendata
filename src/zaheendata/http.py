@@ -14,6 +14,7 @@ import sqlite3
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -41,8 +42,31 @@ class RetryableHTTPError(Exception):
         self.retry_after = retry_after
 
 
+class HostPaused(Exception):
+    """This host is skipped for the rest of the run (quota / rate-limit exhausted)."""
+
+    def __init__(self, host: str, reason: str):
+        super().__init__(f"{host} paused: {reason}")
+        self.host = host
+        self.reason = reason
+
+
 class RobotsDisallowed(Exception):
     pass
+
+
+def parse_retry_after(value: str | None) -> float | None:
+    """Seconds to wait from a Retry-After header (delta-seconds or HTTP-date)."""
+    if not value:
+        return None
+    text = value.strip()
+    if text.isdigit():
+        return float(text)
+    try:
+        dt = parsedate_to_datetime(text)
+        return max(0.0, dt.timestamp() - time.time())
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
 
 
 # --------------------------------------------------------------------------- rate limiting
@@ -199,6 +223,9 @@ class HttpClient:
         self._host_sem: dict[str, asyncio.Semaphore] = {}
         self._buckets: dict[str, TokenBucket] = {}
         self._host_rates: dict[str, float] = {}
+        self._host_cooldown: dict[str, float] = {}
+        self._429_streak: dict[str, int] = {}
+        self._host_disabled: dict[str, str] = {}
 
     def set_host_rate(self, host: str, requests_per_second: float, concurrency: int | None = None) -> None:
         self._host_rates[host] = requests_per_second
@@ -217,6 +244,18 @@ class HttpClient:
         if host not in self._host_sem:
             self._host_sem[host] = asyncio.Semaphore(self.settings.per_host_concurrency)
         return self._host_sem[host]
+
+    def is_paused(self, host: str) -> bool:
+        return host in self._host_disabled
+
+    def pause_reason(self, host: str) -> str | None:
+        return self._host_disabled.get(host)
+
+    def _disable_host(self, host: str, reason: str) -> None:
+        if host in self._host_disabled:
+            return
+        self._host_disabled[host] = reason
+        log.warning("http.host_paused", host=host, reason=reason)
 
     async def request(
         self,
@@ -247,7 +286,15 @@ class HttpClient:
         if check_robots and self.settings.respect_robots_txt and not await self.robots.allowed(url):
             raise RobotsDisallowed(url)
 
+        if self.is_paused(host):
+            raise HostPaused(host, self._host_disabled[host])
+
         async def _once() -> httpx.Response:
+            if self.is_paused(host):
+                raise HostPaused(host, self._host_disabled[host])
+            cooldown = self._host_cooldown.get(host, 0) - time.monotonic()
+            if cooldown > 0:
+                await asyncio.sleep(min(cooldown, 120))
             async with self._global, self._sem(host):
                 await self._bucket(host).acquire()
                 if max_bytes:
@@ -271,24 +318,36 @@ class HttpClient:
                     resp = await self._client.request(
                         method, url, params=params, json=json_body, data=data, headers=headers
                     )
+            if 200 <= resp.status_code < 400:
+                self._429_streak[host] = 0
             if resp.status_code in (408, 425, 429, 500, 502, 503, 504):
-                ra = resp.headers.get("retry-after")
-                raise RetryableHTTPError(resp.status_code, float(ra) if ra and ra.isdigit() else None)
+                wait = parse_retry_after(resp.headers.get("retry-after"))
+                if resp.status_code == 429:
+                    wait = 20.0 if wait is None else wait
+                    self._host_cooldown[host] = time.monotonic() + wait
+                    self._429_streak[host] = self._429_streak.get(host, 0) + 1
+                    if self._429_streak[host] >= 6:
+                        self._disable_host(host, "HTTP 429 rate limit / quota exhausted")
+                raise RetryableHTTPError(resp.status_code, wait)
             return resp
 
         try:
             async for attempt in AsyncRetrying(
                 stop=stop_after_attempt(self.settings.http_max_retries),
-                wait=wait_exponential_jitter(initial=1, max=30),
+                wait=wait_exponential_jitter(initial=1, max=60),
                 retry=retry_if_exception_type((RetryableHTTPError, httpx.TransportError)),
                 reraise=False,
             ):
                 with attempt:
                     try:
                         resp = await _once()
+                    except HostPaused:
+                        raise
                     except RetryableHTTPError as exc:
+                        if exc.status == 429 and self.is_paused(host):
+                            raise HostPaused(host, self._host_disabled[host]) from exc
                         if exc.retry_after:
-                            await asyncio.sleep(min(exc.retry_after, 60))
+                            await asyncio.sleep(min(exc.retry_after, 120))
                         raise
         except RetryError as exc:
             last = exc.last_attempt.exception()
