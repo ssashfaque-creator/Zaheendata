@@ -1,4 +1,5 @@
 from zaheendata.normalize import (
+    is_own_website,
     looks_like_company,
     looks_like_person,
     name_similarity,
@@ -22,6 +23,13 @@ def test_person_vs_company() -> None:
 
 def test_person_display_flips_last_first() -> None:
     assert person_display_name("BURGOS, DAVID") == "DAVID BURGOS"
+
+
+def test_directory_hosts_are_not_own_sites() -> None:
+    assert is_own_website("https://coolair.example/")
+    assert not is_own_website("https://www.yelp.com/biz/cool-air")
+    assert not is_own_website("https://homeadvisor.com/rated.x")
+    assert not is_own_website("https://facebook.com/coolairatx")
 
 
 def test_phone_and_similarity() -> None:

@@ -115,6 +115,29 @@ def phone_key(value: str | None) -> str:
     return normalize_phone(value).lstrip("+")
 
 
+DIRECTORY_HOSTS = {
+    "homeadvisor.com",
+    "angi.com",
+    "angieslist.com",
+    "yelp.com",
+    "yellowpages.com",
+    "bbb.org",
+    "facebook.com",
+    "instagram.com",
+    "m.facebook.com",
+    "mapquest.com",
+    "nextdoor.com",
+    "thumbtack.com",
+    "houzz.com",
+    "porch.com",
+    "superpages.com",
+    "whitepages.com",
+    "google.com",
+    "business.site",
+    "n49.com",
+}
+
+
 def domain_from_url(value: str | None) -> str:
     raw = (value or "").strip()
     if not raw:
@@ -125,6 +148,13 @@ def domain_from_url(value: str | None) -> str:
     if host.startswith("www."):
         host = host[4:]
     return host
+
+
+def is_own_website(value: str | None) -> bool:
+    host = domain_from_url(value)
+    if not host:
+        return False
+    return not any(host == blocked or host.endswith("." + blocked) for blocked in DIRECTORY_HOSTS)
 
 
 def canonicalize_website(value: str | None) -> str:

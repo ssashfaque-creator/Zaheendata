@@ -12,6 +12,7 @@ class Subsector:
     search_queries: tuple[str, ...]
     license_source: str
     fit_signal: str
+    overture_categories: tuple[str, ...] = ()
     signal_keywords: dict[str, tuple[str, ...]] = field(default_factory=dict)
     wide_area: bool = False
     min_reviews_keep: int = 10
@@ -26,6 +27,7 @@ SUBSECTORS: dict[str, Subsector] = {
         search_queries=("plumber", "HVAC contractor", "heating and air conditioning"),
         license_source="tdlr_ac_contractor+tsbpe_rmp",
         fit_signal="Offers emergency service and maintenance plans",
+        overture_categories=("plumbing", "hvac_service", "heating_and_air_conditioning"),
         signal_keywords={
             "emergency_service": (
                 "24/7",
@@ -55,6 +57,7 @@ SUBSECTORS: dict[str, Subsector] = {
         search_queries=("electrician", "electrical contractor"),
         license_source="tdlr_electrical_contractor",
         fit_signal="Residential service work rather than commercial bids",
+        overture_categories=("electrician", "electrician_service"),
         signal_keywords={
             "residential": ("residential", "home electrical", "panel upgrade", "homeowner"),
             "commercial_only": ("commercial only", "design-build", "plan spec", "bid only"),
@@ -68,6 +71,7 @@ SUBSECTORS: dict[str, Subsector] = {
         search_queries=("landscaper", "lawn care", "landscape maintenance"),
         license_source="none",
         fit_signal="Recurring maintenance contracts and several crews",
+        overture_categories=("landscaping", "lawn_service", "gardener", "tree_service", "irrigation_service"),
         signal_keywords={
             "recurring_service": (
                 "weekly",
@@ -86,6 +90,7 @@ SUBSECTORS: dict[str, Subsector] = {
         search_queries=("home remodeler", "kitchen remodel", "bathroom remodel"),
         license_source="contractor_license_lists",
         fit_signal="Many estimates per month; project gallery online",
+        overture_categories=("bathroom_remodeling", "kitchen_remodeling", "carpenter", "flooring_contractor"),
         signal_keywords={
             "gallery": ("gallery", "our work", "before and after", "portfolio"),
             "quote_form": ("free estimate", "request a quote", "get a quote"),
@@ -99,6 +104,7 @@ SUBSECTORS: dict[str, Subsector] = {
         search_queries=("roofer", "roofing contractor", "roof inspection"),
         license_source="contractor_license_lists",
         fit_signal="Inspection request form; insurance and storm work",
+        overture_categories=("roofing",),
         signal_keywords={
             "inspection": ("roof inspection", "free inspection", "inspection request"),
             "storm": ("storm", "insurance claim", "hail"),
@@ -112,6 +118,7 @@ SUBSECTORS: dict[str, Subsector] = {
         search_queries=("pest control", "exterminator"),
         license_source="state_pest_control_licenses",
         fit_signal="Quarterly service plans with recurring billing",
+        overture_categories=("pest_control_service",),
         wide_area=True,
         signal_keywords={
             "recurring_service": ("quarterly", "monthly service", "pest-free plan", "recurring"),
@@ -125,6 +132,7 @@ SUBSECTORS: dict[str, Subsector] = {
         search_queries=("house painter", "residential painter"),
         license_source="none",
         fit_signal='Residential work with "free estimate" offers',
+        overture_categories=("painting",),
         signal_keywords={
             "free_estimate": ("free estimate", "free quote"),
             "residential": ("interior", "exterior", "residential"),
@@ -143,6 +151,7 @@ SUBSECTORS: dict[str, Subsector] = {
         ),
         license_source="none",
         fit_signal="Recurring route-based service",
+        overture_categories=("pool_cleaning", "gutter_service", "chimney_sweep", "pressure_washing"),
         wide_area=True,
         signal_keywords={
             "recurring_service": ("monthly", "route", "membership", "weekly service"),
@@ -156,6 +165,7 @@ SUBSECTORS: dict[str, Subsector] = {
         search_queries=("hair salon", "beauty salon"),
         license_source="tdlr_cosmetology_establishment",
         fit_signal="5+ chairs, sells retail products, phone-only or basic booking",
+        overture_categories=("beauty_salon", "hair_salon"),
         signal_keywords={
             "retail": ("retail", "product bar", "salon professional"),
             "booking": ("book now", "vagaro", "fresha", "booksy", "styleseat"),
@@ -169,6 +179,7 @@ SUBSECTORS: dict[str, Subsector] = {
         search_queries=("nail salon",),
         license_source="tdlr_cosmetology_establishment",
         fit_signal="Walk-in heavy, sells gift cards, no online booking",
+        overture_categories=("nail_salon",),
         signal_keywords={
             "gift_cards": ("gift card", "gift certificate"),
             "walk_in": ("walk-in", "walk in", "no appointment"),
@@ -182,6 +193,7 @@ SUBSECTORS: dict[str, Subsector] = {
         search_queries=("janitorial", "commercial cleaning", "office cleaning"),
         license_source="state_business_registrations",
         fit_signal="Several commercial clients and staff schedules",
+        overture_categories=("home_cleaning", "cleaning_service"),
         signal_keywords={
             "commercial": ("commercial cleaning", "office building", "nightly"),
         },
@@ -194,6 +206,7 @@ SUBSECTORS: dict[str, Subsector] = {
         search_queries=("florist", "flower shop"),
         license_source="saf_ftd_teleflora",
         fit_signal="Wedding and event work; own online store, not wire orders only",
+        overture_categories=("florist",),
         wide_area=True,
         signal_keywords={
             "events": ("wedding", "event", "bridal"),
@@ -208,6 +221,7 @@ SUBSECTORS: dict[str, Subsector] = {
         search_queries=("pet store", "pet supply"),
         license_source="none",
         fit_signal="In-store grooming (bookings plus retail)",
+        overture_categories=("pet_store",),
         wide_area=True,
         signal_keywords={
             "grooming": ("grooming", "book a groom"),
@@ -221,6 +235,7 @@ SUBSECTORS: dict[str, Subsector] = {
         search_queries=("sporting goods", "team uniforms"),
         license_source="none",
         fit_signal="Team and uniform sales needing quotes and invoices",
+        overture_categories=("sporting_goods_store",),
         wide_area=True,
         signal_keywords={
             "team": ("team sales", "uniforms", "custom jersey", "invoice"),
@@ -234,6 +249,7 @@ SUBSECTORS: dict[str, Subsector] = {
         search_queries=("gift shop", "souvenir shop"),
         license_source="none",
         fit_signal="Sells in-store and on Shopify or Etsy",
+        overture_categories=("gift_shop",),
         wide_area=True,
         signal_keywords={
             "online_store": ("shopify", "etsy", "add to cart"),
@@ -247,6 +263,7 @@ SUBSECTORS: dict[str, Subsector] = {
         search_queries=("women's boutique", "women's clothing store"),
         license_source="none",
         fit_signal="Sells through Instagram or live sales as well as the shop",
+        overture_categories=("womens_clothing_store", "fashion_boutique"),
         wide_area=True,
         signal_keywords={
             "instagram": ("instagram", "live sale", "facebook live"),
@@ -260,6 +277,7 @@ SUBSECTORS: dict[str, Subsector] = {
         search_queries=("hobby shop", "game store", "toy store"),
         license_source="astra_directory",
         fit_signal="Hosts events or tournaments; has an online store",
+        overture_categories=("toy_store",),
         wide_area=True,
         signal_keywords={
             "hosts_events": ("tournament", "game night", "friday night magic", "event"),

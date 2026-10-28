@@ -30,7 +30,10 @@ def test_extract_hvac_signals() -> None:
     assert signals["owner_on_site"] == "Jane Plumber"
     assert "ecommerce" in signals["tool_categories"]
     assert "payments" in signals["tool_categories"]
-    assert "booking" in signals["tool_categories"]
+    assert "field_service" in signals["tool_categories"]
+    assert "shopify" in signals["tech_stack"]
+    assert "jobber" in signals["tech_stack"]
+    assert "stripe" in signals["tech_stack"]
 
 
 def test_apply_signals_sets_email_and_owner() -> None:

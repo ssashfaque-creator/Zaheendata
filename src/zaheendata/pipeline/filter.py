@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from zaheendata.franchises import franchise_hit
 from zaheendata.models import Lead
+from zaheendata.normalize import is_own_website
 from zaheendata.subsectors import Subsector
 
 
@@ -12,11 +13,22 @@ def _review_count(lead: Lead) -> int:
         return 0
 
 
-def classify(lead: Lead, subsector: Subsector, *, require_website: bool = True) -> Lead:
+def classify(
+    lead: Lead,
+    subsector: Subsector,
+    *,
+    require_website: bool = True,
+    require_reviews: bool = True,
+) -> Lead:
     brand = franchise_hit(lead.name) or franchise_hit(lead.owner_name)
     if brand:
         lead.status = "rejected"
         lead.rejection_reason = f"franchise/chain: franchise brand: {brand}"
+        return lead
+
+    if lead.website and not is_own_website(lead.website):
+        lead.status = "rejected"
+        lead.rejection_reason = "directory listing, not own website"
         return lead
 
     if require_website and not lead.website:
@@ -25,7 +37,7 @@ def classify(lead: Lead, subsector: Subsector, *, require_website: bool = True) 
         return lead
 
     reviews = _review_count(lead)
-    if lead.google_place_id and reviews < subsector.min_reviews_keep:
+    if require_reviews and lead.google_place_id and reviews < subsector.min_reviews_keep:
         lead.status = "rejected"
         lead.rejection_reason = f"too few Google reviews: {reviews} < {subsector.min_reviews_keep}"
         return lead
@@ -34,10 +46,21 @@ def classify(lead: Lead, subsector: Subsector, *, require_website: bool = True) 
     return lead
 
 
-def keep_for_enrichment(leads: list[Lead], subsector: Subsector) -> list[Lead]:
+def keep_for_enrichment(
+    leads: list[Lead],
+    subsector: Subsector,
+    *,
+    require_website: bool = True,
+    require_reviews: bool = True,
+) -> list[Lead]:
     kept: list[Lead] = []
     for lead in leads:
-        classify(lead, subsector)
+        classify(
+            lead,
+            subsector,
+            require_website=require_website,
+            require_reviews=require_reviews,
+        )
         if lead.status != "rejected":
             kept.append(lead)
     return kept

@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections import defaultdict
 from html import unescape
-from typing import Iterable
+from typing import Callable, Iterable
 from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
 
+from zaheendata.fingerprints import detect_tools, summarize_tools
 from zaheendata.models import Lead
 from zaheendata.normalize import canonicalize_website, email_is_role_account, looks_like_person
 
@@ -17,45 +17,6 @@ USER_AGENT = "ZaheendataLeadResearch/0.1 (+https://github.com/ssashfaque-creator
 EMAIL_RE = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.I)
 MAX_PAGES = 4
 MAX_BYTES = 400_000
-
-BOOKING_PROVIDERS = {
-    "servicetitan": ("servicetitan.com", "st.com"),
-    "housecall_pro": ("housecallpro.com", "housecall.co"),
-    "jobber": ("getjobber.com", "cdn.getjobber.com"),
-    "service_fusion": ("servicefusion.com",),
-    "workiz": ("workiz.com",),
-    "launch27": ("launch27.com",),
-    "setmore": ("setmore.com",),
-    "calendly": ("calendly.com",),
-    "acuity": ("acuityscheduling.com",),
-    "booksy": ("booksy.com",),
-    "vagaro": ("vagaro.com",),
-    "fresha": ("fresha.com",),
-    "styleseat": ("styleseat.com",),
-    "square_appointments": ("squareup.com/appointments", "square.site"),
-    "angi": ("angi.com", "angieslist.com"),
-    "thumbtack": ("thumbtack.com",),
-}
-
-TOOL_CATEGORIES = {
-    "payments": ("squareup.com", "stripe.com", "clover.com", "paypal.com"),
-    "ecommerce": ("shopify.com", "cdn.shopify.com", "bigcommerce.com", "woocommerce", "etsy.com"),
-    "email": ("list-manage.com", "mailchimp.com", "constantcontact.com", "klaviyo.com", "convertkit.com"),
-    "booking": tuple(item for values in BOOKING_PROVIDERS.values() for item in values),
-    "crm": ("hubspot.com", "salesforce.com", "zoho.com"),
-    "chat": ("jengo.com", "tidio.com", "intercom.com", "drift.com", "tawk.to"),
-    "call_tracking": ("callrail.com", "calltrackingmetrics.com", "invoca.com"),
-    "ads": ("googletagmanager.com", "google-analytics.com", "facebook.net", "connect.facebook.net"),
-    "cms": ("wp-content", "wix.com", "squarespace.com", "weebly.com", "godaddy.com/websites"),
-}
-
-STORE_PLATFORMS = {
-    "shopify": ("cdn.shopify.com", "myshopify.com"),
-    "woocommerce": ("woocommerce", "wp-content/plugins/woocommerce"),
-    "wix": ("wix.com", "wixstatic.com"),
-    "squarespace": ("squarespace.com",),
-    "etsy": ("etsy.com",),
-}
 
 HREF_CANDIDATES = (
     "contact",
@@ -104,21 +65,9 @@ def extract_signals(html: str, url: str) -> dict:
     blob = _blob(html, text)
     emails = sorted({match.group(0).lower() for match in EMAIL_RE.finditer(html) if not match.group(0).lower().endswith((".png", ".jpg", ".webp", ".svg"))})
     emails = [email for email in emails if "example.com" not in email and "sentry" not in email]
-    tools: dict[str, set[str]] = defaultdict(set)
-    for category, needles in TOOL_CATEGORIES.items():
-        for needle in needles:
-            if needle in blob:
-                tools[category].add(needle)
-    booking = ""
-    for provider, needles in BOOKING_PROVIDERS.items():
-        if any(needle in blob for needle in needles):
-            booking = provider
-            break
-    store = ""
-    for platform, needles in STORE_PLATFORMS.items():
-        if any(needle in blob for needle in needles):
-            store = platform
-            break
+    summary = summarize_tools(detect_tools(blob))
+    booking = summary["booking_provider"]
+    store = summary["store_platform"]
     instagram = ""
     owner_on_site = ""
     for anchor in soup.find_all("a", href=True):
@@ -163,12 +112,13 @@ def extract_signals(html: str, url: str) -> dict:
         "sells_gift_cards": "gift card" in blob or "gift certificate" in blob,
         "hosts_events": _contains_any(blob, ("tournament", "game night", "workshop", "wedding")),
         "instagram": instagram,
-        "tech_stack": ",".join(sorted({needle for values in tools.values() for needle in values})),
-        "tool_categories": ",".join(sorted(tools)),
+        "tech_stack": summary["tech_stack"],
+        "tool_categories": summary["tool_categories"],
         "pain_examples": "; ".join(pain),
         "owner_on_site": owner_on_site,
         "child_links": list(dict.fromkeys(child_links))[:6],
         "text_excerpt": text[:1500],
+        "html": html[:MAX_BYTES],
     }
 
 
@@ -182,6 +132,8 @@ def merge_signals(target: dict, incoming: dict) -> dict:
         elif key == "pain_examples":
             parts = [part for part in f"{target.get(key, '')}; {value}".split(";") if part.strip()]
             target[key] = "; ".join(dict.fromkeys(parts))
+        elif key == "html":
+            target[key] = (target.get(key) or "") + "\n" + (value or "")
         elif isinstance(value, bool):
             target[key] = bool(target.get(key)) or value
         elif value and not target.get(key):
@@ -212,6 +164,8 @@ def apply_signals(lead: Lead, signals: dict) -> Lead:
     lead.tech_stack = signals.get("tech_stack") or ""
     lead.tool_categories = signals.get("tool_categories") or ""
     lead.pain_examples = signals.get("pain_examples") or ""
+    if signals.get("html"):
+        lead.extra["_html"] = str(signals["html"])[:MAX_BYTES]
     if signals.get("owner_on_site") and not looks_like_person(lead.owner_name):
         lead.owner_name = signals["owner_on_site"]
         lead.owner_source = "website"
@@ -247,11 +201,20 @@ async def crawl_lead(client: httpx.AsyncClient, lead: Lead, semaphore: asyncio.S
         return lead
 
 
-async def crawl_leads(leads: list[Lead], *, concurrency: int = 8) -> list[Lead]:
+async def crawl_leads(
+    leads: list[Lead],
+    *,
+    concurrency: int = 8,
+    on_html: Callable[[Lead, str], None] | None = None,
+) -> list[Lead]:
     if not leads:
         return leads
     semaphore = asyncio.Semaphore(concurrency)
     headers = {"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"}
     async with httpx.AsyncClient(headers=headers, http2=False) as client:
         await asyncio.gather(*(crawl_lead(client, lead, semaphore) for lead in leads))
+    for lead in leads:
+        html = lead.extra.pop("_html", "")
+        if on_html and html:
+            on_html(lead, html)
     return leads

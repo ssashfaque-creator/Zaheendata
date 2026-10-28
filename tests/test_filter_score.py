@@ -11,6 +11,23 @@ def test_franchise_rejected() -> None:
     assert "mr rooter" in lead.rejection_reason
 
 
+def test_directory_website_rejected() -> None:
+    lead = empty_lead(
+        name="Local HVAC",
+        website="https://www.homeadvisor.com/rated.localhvac",
+        google_reviews=80,
+    )
+    classify(lead, get_subsector("plumbing_hvac"))
+    assert lead.status == "rejected"
+    assert "directory" in lead.rejection_reason
+
+
+def test_national_path_skips_review_floor() -> None:
+    lead = empty_lead(name="Local HVAC", website="https://localhvac.example")
+    classify(lead, get_subsector("plumbing_hvac"), require_reviews=False)
+    assert lead.status == "enrich"
+
+
 def test_no_website_rejected() -> None:
     lead = empty_lead(name="Local HVAC", google_reviews=40)
     classify(lead, get_subsector("plumbing_hvac"))

@@ -1,29 +1,38 @@
 # Zaheendata
 
-Places-first pipeline that builds a **qualified** local-service lead list from free and public sources, using the scoring rules in the attached sub-sector guide.
+National, **download-first** warehouse for qualified local-service leads across 17 NAICS sub-sectors.
 
-The previous Austin plumbing export failed because it started from Texas sales-tax permits and SBA PPP rows. Those files have names and sometimes phones. They do **not** have websites, Google reviews, or owner emails, which is why 212 of 213 rows had a blank website, none were crawled, and every score was 0 or 1.
-
-## What changed
-
-Do not enrich 200 tax records one by one. Discover businesses from the source that already has the fields you filter and score on.
+Free public files are loaded into DuckDB *before* scoring. Live site crawls (and later Google Places) only run on businesses that already have an owned website. The earlier Austin plumbing export failed because it started from Texas sales-tax permits and SBA PPP rows — names, sometimes phones, almost never a website.
 
 ```
-Google Places Text Search  ──►  cheap filters  ──►  crawl 3–4 pages  ──►  score  ──►  top 100
-        │                     (franchise, no site,     only survivors
-        │                      <10 reviews)
-        └── join TDLR / TSBPE licenses for owner name + license #
+Overture Places (S3 GeoParquet)
+        │  bbox + taxonomy.primary
+        ▼
+   DuckDB warehouse          ◄── license CSVs, optional PPP overlay
+        │
+        ├─ filter (franchise / directory / no website)
+        ├─ Common Crawl snapshots (optional) + live HTML
+        ├─ tech fingerprints (Shopify, QuickBooks, Jobber, …)
+        ├─ score 0–2 × 5 axes
+        └─ export top N
 ```
 
-| Stage | Source | Cost / time | What you get |
-| --- | --- | --- | --- |
-| Discovery | Google Places API (New) Text Search | ~20–40 calls per city/trade. Free inside the 1,000-call/month Enterprise cap | Name, phone, **website**, address, rating, **review count**, place id, 5 recent reviews |
-| Universe / owner | TDLR open data (`7358-krk7`) and TSBPE Responsible Master Plumber CSV | Free bulk, seconds | License number, person owner name. HVAC A/C contractor rows have **no phone/address** in the public file; electrical and salon shops do |
-| Size context | Census CBP (optional key) | Free | County establishment counts by 5–9 and 10–19 employees. Counts only, not a firm list |
-| Website details | Direct GET of home/contact/about/services | Free, ~2–5 min for 200 sites at 8 concurrent | Email, booking widget, quote form, emergency/maintenance copy, tech stack |
-| Do not use as discovery | TX sales-tax permits, SBA PPP | Wasted time | No website, stale size, wrong NAICS, distributors mixed in |
+Google Places is an optional later overlay (`zaheendata run`) for review counts. It is not required to build the national file.
 
-Employee count 5–19 is **not** in any free firm-level file. Use Google review volume plus franchise/chain drops as the public proxy. Overlay Data Axle (often free via a public library card) or a small Apollo/ZoomInfo pull if you must enforce headcount.
+## Free sources (download these first)
+
+| Layer | Where | What you actually get |
+| --- | --- | --- |
+| **Discovery** | [Overture Maps Places](https://docs.overturemaps.org/guides/places/) on public S3 `s3://overturemaps-us-west-2/release/<date>/theme=places/type=place/` | Name, **website**, **phone**, email, address, lat/lng, brand, socials, taxonomy. Slice with a bbox (US / state / metro) and `taxonomy.primary` |
+| **Tech stack** | Direct GET of home/contact/about, optional [Common Crawl](https://commoncrawl.org/) WARC | Shopify, QuickBooks, ServiceTitan, Jobber, Square, Mailchimp, WordPress, … from script URLs and copy |
+| **Person owner** | State license bulk files (TX TDLR SODA works unattended; CA/FL/NY are catalogued as manual downloads) | License number + person name. LLC names are **not** owners |
+| **Size proxy** | SBA PPP FOIA (optional overlay, not discovery) | `jobs_reported` on a name match. Stale, incomplete |
+| **Universe counts** | Census CBP | County establishment counts by 5–9 / 10–19 employees. Counts only, not a firm list |
+| **Reviews / “busy”** | Google Places API (New) later | Rating, review count, 5 recent reviews. Needed for `busy_and_growing` |
+
+There is **no free national firm-level 5–19 employee list**. Review volume plus franchise drops is the public proxy. Overlay Data Axle (often via a library card) or a small Apollo pull if you must enforce headcount.
+
+Directory hosts (HomeAdvisor, Angi, Yelp, Facebook, `business.site`, …) are not the business’s own website and are dropped before crawl.
 
 ## Setup
 
@@ -31,51 +40,60 @@ Employee count 5–19 is **not** in any free firm-level file. Use Google review 
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-cp .env.example .env   # add GOOGLE_MAPS_API_KEY
+cp .env.example .env
 ```
 
-Enable **Places API (New)** on the Google Cloud project. Text Search requests ask for `websiteUri`, `rating`, and `userRatingCount` in one call so you do not pay for Place Details on every row.
+No API key is required for `download` / `build` on Overture. DuckDB talks to the public S3 bucket with `httpfs`.
 
 ## Commands
 
 ```bash
-# Coverage post-mortem on an old export
-zaheendata diagnose path/to/austin-plumbing-200.csv
+# Confirm public S3 + DuckDB
+zaheendata doctor --geo Austin,TX
 
-# Austin plumbing + HVAC, top 100
-zaheendata run --subsector plumbing_hvac --city Austin --state TX --out data/austin-plumbing.csv
+# National-capable build: download Overture → warehouse → crawl tools → score
+zaheendata build --geo Austin,TX --subsector plumbing_hvac --limit 200 --out data/austin-plumbing.csv
+zaheendata build --geo TX --subsector plumbing_hvac --out data/tx-plumbing.csv
+zaheendata build --geo US --subsector plumbing_hvac --limit 5000 --out data/us-plumbing.csv
 
-# Plumbing licenses from TSBPE (download CSV from the board if Cloudflare blocks the fetch)
-zaheendata run --subsector plumbing_hvac --tsbpe-file ~/Downloads/RMP.csv
+# Stepwise (download once, reuse forever)
+zaheendata download places --geo US --subsector plumbing_hvac --out data/raw/overture_plumbing_hvac_US.parquet
+zaheendata ingest --places data/raw/overture_plumbing_hvac_US.parquet
+zaheendata enrich --subsector plumbing_hvac --mode live
+zaheendata score --subsector plumbing_hvac --keep 100 --out data/leads.csv
+zaheendata stats
+
+# License catalog (bulk SODA vs manual board extracts)
+zaheendata licenses --subsector plumbing_hvac
+zaheendata build --geo Austin,TX --subsector plumbing_hvac --licenses --limit 200
+
+# Optional Google Places metro overlay (paid/quota later)
+zaheendata run --subsector plumbing_hvac --city Austin --state TX --out data/austin-google.csv
 
 zaheendata subsectors
+zaheendata diagnose path/to/old-export.csv
 ```
 
-`run` writes the same 60-column CSV the earlier program used, so ranking sheets keep working.
+`--geo` is `US`, a state code (`TX`), or `City,ST` (`Austin,TX`, `Chicago,IL`, `Los Angeles,CA`, …). Start with a metro or one state; a full-US plumbing extract is the same program with a larger bbox.
 
-## Why the uploaded file is not a lead list
+## Warehouse
 
-Diagnose on `austin-plumbing-200.csv`:
+DuckDB file `data/warehouse.duckdb` (override with `ZAHEENDATA_WAREHOUSE`):
 
-- 213 rows, 100 marked `selected`
-- **1 website**, **0 crawled**, **0 emails**, **0 Google place ids**, **0 reviews**
-- Sources: 162 tax permits, 63 PPP loans
-- **0 license numbers** (the guide’s plumbing/HVAC cross-check)
-- Owner field is the LLC name on 144 rows, then scored as `owner_reachable=1`
-- Johnson Controls, Baker Distributing, Freedom Solar, and Mr Rooter still sit in “selected”
+- `places` — Overture businesses, including those without a website
+- `licenses` — person owners where a board file exists
+- `ppp` — optional jobs_reported overlay
+- `snapshots` / `technologies` — HTML fetches and detected tools
+- `leads` — scored export rows
 
-That list is a raw registry dump with a sort key, not qualified demand.
+Tech fingerprints live in `src/zaheendata/fingerprints.py` (QuickBooks, Xero, Shopify, WooCommerce, ServiceTitan, Jobber, Housecall Pro, Square, Stripe, Mailchimp, HubSpot, GoHighLevel, …). Crawl HTML is matched against script CDNs and product copy; results land in `tech_stack` / `tool_categories`.
 
-## Efficiency rules the code enforces
+## Scoring
 
-1. **Places is discovery**, not a per-row afterthought. One Text Search page returns 20 businesses that already have websites and review counts.
-2. **Filter before crawl.** Franchises, no website, and under 10 reviews never hit the network.
-3. **Crawl only survivors**, 8 at a time, 8s timeout, 4 pages max, HTML cached.
-4. **No BuiltWith / LinkedIn scrape on the full set.** Tech stack comes from script URLs and known booking widgets. Owner names come from the license file and the About page.
-5. **Do not treat an LLC name as an owner.** `owner_reachable` requires a person.
+Same 0–2 axes as the sub-sector guide: `busy_and_growing`, `admin_pain`, `multi_tool`, `owner_reachable`, `subsector_signal`. On the free path `busy_and_growing` stays 0 until Google review counts are joined. `owner_reachable` requires a **person** name, not an LLC.
 
-## Pilot order (from the guide)
+## Why the uploaded Austin file was not a lead list
 
-Start with plumbing/HVAC, electrical, and beauty salons in one metro. Those trades have public license files plus dense Google listings. Retail, pest, and “other building services” need a whole state to reach 100.
+Diagnose on `austin-plumbing-200.csv`: 213 rows, **1 website**, **0 crawled**, **0 emails**, **0 place ids**, **0 licenses**. Sources were tax permits and PPP. Owner was the LLC name on 144 rows. That list is a registry dump with a sort key.
 
 Outreach still has to follow CAN-SPAM and TCPA. This repo builds a research file; it does not send mail or texts.
