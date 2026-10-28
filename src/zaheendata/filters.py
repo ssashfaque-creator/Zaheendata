@@ -113,8 +113,8 @@ class PoorFitFilter:
         require_reviews: bool = True,
         deferred: set[str] | None = None,
     ) -> dict[str, int]:
-        """``deferred`` holds ids of businesses whose website / review rules are postponed (they
-        came from a registry and will be matched to Google Maps during enrichment)."""
+        """``deferred`` holds ids whose website / review rules wait until a URL exists or the
+        maps stage has looked the listing up. Franchise, closed and geography still apply."""
         self.franchise.fit(businesses)
         reasons: Counter[str] = Counter()
         for b in businesses:

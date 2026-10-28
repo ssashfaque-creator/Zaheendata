@@ -1,16 +1,17 @@
 """Campaign pipeline: the four-step method from the brief as resumable stages.
 
-    collect  -> long list of 300-500 raw observations from government registries, Maps and the
-                sub-sector cross-check sources
+    collect  -> long list from government registries, Yelp, OSM (Google Places is deferred)
     resolve  -> entity resolution into unique businesses
-    filter   -> remove poor fits (franchise/chain, no website, <10 reviews, outside area)
-    enrich   -> reviews (newest), website crawl + features, tech stack, pain analysis; re-filter
-    score    -> five 0/1/2 signals, rank, keep top N
-    contacts -> owner name / email / phone for the shortlist only (cost control)
+    filter   -> franchise/chain, closed, outside area (website / Google-review rules wait)
+    enrich   -> crawl any website we already have; extract all site fields + tech stack
+    score    -> five 0/1/2 signals from site + registry data, keep a shortlist
+    maps     -> Google Places only on the shortlist (website, reviews, rating); re-score
+    contacts -> owner name / email / phone for the shortlist only
     finalize -> stats, cost ledger, campaign state
 
 Each stage persists its output, so a crashed or cancelled run can be resumed from any stage with
-``CampaignRunner.run(campaign, start_stage=...)``.
+``CampaignRunner.run(campaign, start_stage=...)``. Stop after ``score`` for a fully free pass;
+resume with ``start_stage=maps`` once a Google key is available.
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ from .storage import Database
 
 log = get_logger(__name__)
 
-STAGES = ["collect", "resolve", "filter", "enrich", "score", "contacts", "finalize"]
+STAGES = ["collect", "resolve", "filter", "enrich", "score", "maps", "contacts", "finalize"]
 ProgressHook = Callable[[str, dict[str, Any]], Awaitable[None] | None]
 
 
@@ -113,6 +114,7 @@ class CampaignRunner:
             "filter": self.stage_filter,
             "enrich": self.stage_enrich,
             "score": self.stage_score,
+            "maps": self.stage_maps,
             "contacts": self.stage_contacts,
             "finalize": self.stage_finalize,
         }
@@ -193,6 +195,9 @@ class CampaignRunner:
 
         tasks = []
         for source in ctx.sources:
+            if self.settings.defer_google_places and source.name in {"google_places", "google_maps_scraper"}:
+                ctx.stats.setdefault("collect_skipped_sources", []).append(source.name)
+                continue
             # Registries / licence rolls / imports are region-level: one call per distinct region (or once).
             if source.kind.value in ("vendor", "import", "license", "registry"):
                 regions = {c.region for c in ctx.cells} or {None}
@@ -269,13 +274,17 @@ class CampaignRunner:
     def _needs_maps_match(b: Business) -> bool:
         return b.google_place_id is None and (not b.website or b.review_count is None)
 
+    def _missing_website_or_reviews(self, businesses: list[Business]) -> set[str]:
+        return {b.id for b in businesses if not b.website or b.review_count is None}
+
     async def stage_filter(self, ctx: RunContext) -> None:
         businesses = await self.db.list_businesses(ctx.campaign.id)
         area = AreaMatcher(ctx.campaign.spec.geography, ctx.cells)
-        # Registry / licence records have no website or reviews yet; when Google Places is configured
-        # they are matched to their Maps listing during enrichment, so those two rules wait until then.
-        deferred = {b.id for b in businesses if self._needs_maps_match(b)} if self._places(ctx) else set()
-        ctx.stats["maps_match_pending"] = len(deferred)
+        # Website and Google-review rules wait until a site is in hand (enrich crawl) or the later
+        # maps stage fills them. Franchise / closed / geography still apply now.
+        deferred = self._missing_website_or_reviews(businesses)
+        ctx.stats["website_review_deferred"] = len(deferred)
+        ctx.stats["maps_match_pending"] = len(deferred) if self._places(ctx) else 0
         rest = [b for b in businesses if b.id not in deferred]
         require_reviews = self._review_filter_enabled(ctx, rest) if rest else False
         require_website = self._website_filter_enabled(ctx, rest) if rest else False
@@ -289,33 +298,20 @@ class CampaignRunner:
         await self._emit("filter", remaining=remaining, rejected=reasons)
 
     async def stage_enrich(self, ctx: RunContext) -> None:
+        """Crawl every website we already have and extract all site fields. No Google Places here."""
         if not ctx.campaign.spec.enrich:
             return
         businesses = await self.db.list_businesses(ctx.campaign.id)
         candidates = [b for b in businesses if b.status != BusinessStatus.REJECTED]
-        places = self._places(ctx)
+        # Reviews from Places wait for the maps stage unless the record already has a place id
+        # and the operator opted out of deferral.
+        places = None if self.settings.defer_google_places else self._places(ctx)
         sem = asyncio.Semaphore(self.settings.global_concurrency)
         done = 0
-        matched = 0
-        maps_attempts = 0
-        maps_budget = self.settings.long_list_target * 2
-        places_host = "places.googleapis.com"
 
         async def enrich_one(b: Business) -> None:
-            nonlocal done, matched, maps_attempts
+            nonlocal done
             async with sem:
-                do_match = False
-                if places is not None and self._needs_maps_match(b):
-                    if self.http.is_paused(places_host):
-                        ctx.stats["maps_rate_limited"] = True
-                        b.attributes.setdefault("maps_match", "rate_limited")
-                    elif maps_attempts < maps_budget:
-                        maps_attempts += 1
-                        do_match = True
-                    else:
-                        b.attributes.setdefault("maps_match", "budget")
-                if do_match and places is not None and await self._match_maps(b, places):
-                    matched += 1
                 await self._enrich_business(b, places)
             done += 1
             if done % 25 == 0:
@@ -323,34 +319,29 @@ class CampaignRunner:
                 await self._emit("enrich.progress", done=done, total=len(candidates))
 
         await asyncio.gather(*(enrich_one(b) for b in candidates))
-        # Second filter pass: website-derived franchise signals, refreshed review counts and the
-        # website / review rules for registry records that have now been matched (or not) to Maps.
-        # Records we never looked up (quota / budget) stay deferred so "no website" does not wipe them.
+        # Re-check franchise language discovered on the site. Website / review cuts stay deferred
+        # for records that still lack a URL or a review count.
         area = AreaMatcher(ctx.campaign.spec.geography, ctx.cells)
-        pending_maps = {
-            b.id
-            for b in businesses
-            if b.status != BusinessStatus.REJECTED
-            and self._needs_maps_match(b)
-            and b.attributes.get("maps_match") not in {"matched", "none"}
-        }
-        ctx.stats["maps_match_incomplete"] = len(pending_maps)
-        require_reviews = self._review_filter_enabled(ctx, businesses)
-        require_website = self._website_filter_enabled(ctx, businesses)
+        alive = [b for b in businesses if b.status != BusinessStatus.REJECTED]
+        still_missing = self._missing_website_or_reviews(alive)
+        rest = [b for b in alive if b.id not in still_missing]
+        require_reviews = self._review_filter_enabled(ctx, rest) if rest else False
+        require_website = self._website_filter_enabled(ctx, rest) if rest else False
         reasons = PoorFitFilter(area, self.settings).apply(
             businesses,
             require_website=require_website,
             require_reviews=require_reviews,
-            deferred=pending_maps or None,
+            deferred=still_missing or None,
         )
         await self.db.upsert_businesses(businesses)
         remaining = sum(1 for b in businesses if b.status != BusinessStatus.REJECTED)
         ctx.stats["enriched"] = len(candidates)
-        ctx.stats["maps_matched"] = matched
         ctx.stats["websites_crawled"] = sum(1 for b in candidates if b.website_features.crawled)
         ctx.stats["filter_rejections_after_enrich"] = reasons
         ctx.stats["candidates_after_enrich"] = remaining
-        await self._emit("enrich", enriched=len(candidates), remaining=remaining)
+        await self._emit(
+            "enrich", enriched=len(candidates), remaining=remaining, crawled=ctx.stats["websites_crawled"]
+        )
 
     async def _match_maps(self, b: Business, places: GooglePlacesSource) -> bool:
         """Attach the Google Maps listing to a registry-sourced business (website, phone, reviews)."""
@@ -413,6 +404,79 @@ class CampaignRunner:
             selected=len(selected),
             distribution=ctx.stats["score_distribution"],
         )
+
+    def _maps_pool(self, businesses: list[Business], top_n: int) -> list[Business]:
+        """Shortlist plus a small overflow so Maps can replace leads that fail the review/website cut."""
+        ranked = [b for b in businesses if b.status != BusinessStatus.REJECTED]
+        ranked.sort(
+            key=lambda b: (
+                0 if b.status == BusinessStatus.SELECTED else 1,
+                -(b.score.total if b.score else 0),
+                -int(bool(b.website)),
+                -int(bool(b.website_features.crawled)),
+                b.name.lower(),
+            )
+        )
+        cap = max(top_n, top_n * self.settings.google_places_shortlist_multiplier)
+        return ranked[:cap]
+
+    async def stage_maps(self, ctx: RunContext) -> None:
+        """Google Places on the shortlist only: attach listing, crawl a newly found website, fetch reviews."""
+        places = self._places(ctx)
+        if places is None:
+            businesses = await self.db.list_businesses(ctx.campaign.id)
+            self._website_filter_enabled(ctx, businesses)
+            self._review_filter_enabled(ctx, businesses)
+            ctx.stats["maps_stage"] = "skipped"
+            await self._emit("maps", skipped="no Places source")
+            return
+        businesses = await self.db.list_businesses(ctx.campaign.id)
+        top_n = ctx.campaign.spec.short_list_target or self.settings.short_list_target
+        pool = self._maps_pool(businesses, top_n)
+        ctx.stats["maps_pool"] = len(pool)
+        sem = asyncio.Semaphore(1)  # Places is already paced inside the client; keep lookups serial
+        matched = 0
+        done = 0
+        places_host = "places.googleapis.com"
+
+        async def one(b: Business) -> None:
+            nonlocal matched, done
+            async with sem:
+                if self._needs_maps_match(b):
+                    if self.http.is_paused(places_host):
+                        ctx.stats["maps_rate_limited"] = True
+                        b.attributes.setdefault("maps_match", "rate_limited")
+                    elif await self._match_maps(b, places):
+                        matched += 1
+                await self._enrich_business(b, places)
+            done += 1
+            if done % 10 == 0:
+                await self.db.upsert_businesses([b])
+                await self._emit("maps.progress", done=done, total=len(pool), matched=matched)
+
+        await asyncio.gather(*(one(b) for b in pool))
+        attempted = {b.id for b in pool if b.attributes.get("maps_match") in {"matched", "none"}}
+        deferred = {b.id for b in businesses if b.id not in attempted}
+        area = AreaMatcher(ctx.campaign.spec.geography, ctx.cells)
+        looked_up = [b for b in pool if b.id in attempted]
+        require_reviews = self._review_filter_enabled(ctx, looked_up) if looked_up else False
+        require_website = self._website_filter_enabled(ctx, looked_up) if looked_up else False
+        reasons = PoorFitFilter(area, self.settings).apply(
+            businesses,
+            require_website=require_website,
+            require_reviews=require_reviews,
+            deferred=deferred or None,
+        )
+        for b in businesses:
+            if b.status != BusinessStatus.REJECTED:
+                b.score = self.scoring.score(b, ctx.subsector)
+        selected = rank_and_select(businesses, top_n)
+        await self.db.upsert_businesses(businesses)
+        ctx.stats["maps_matched"] = matched
+        ctx.stats["filter_rejections_after_maps"] = reasons
+        ctx.stats["selected"] = len(selected)
+        ctx.stats["maps_stage"] = "ok"
+        await self._emit("maps", pool=len(pool), matched=matched, selected=len(selected), rejected=reasons)
 
     async def stage_contacts(self, ctx: RunContext) -> None:
         if not ctx.campaign.spec.contact_enrichment:

@@ -63,6 +63,7 @@ async def test_end_to_end_pipeline(env):
         "filter",
         "enrich",
         "score",
+        "maps",
         "contacts",
         "finalize",
     ]
@@ -71,7 +72,6 @@ async def test_end_to_end_pipeline(env):
     assert stats["filter_rejections"] == {
         "franchise/chain": 1,
         "outside target area": 1,
-        "no website": 1,
         "closed": 1,
         "too few reviews": 1,
     }
@@ -92,17 +92,16 @@ async def test_end_to_end_pipeline(env):
     assert top.review_insights.recent_reviews == 4 and top.review_insights.pain_mentions >= 1
 
     scored = await db.list_businesses(result.id, status=BusinessStatus.SCORED)
-    assert [b.name for b in scored] == ["Barton Springs Plumbing"]
+    assert {b.name for b in scored} == {"Barton Springs Plumbing", "Jose's Plumbing Service"}
     rejected = await db.list_businesses(result.id, status=BusinessStatus.REJECTED)
     assert {b.name: b.rejection_reason.split(":")[0] for b in rejected} == {
         "Roto-Rooter Plumbing & Water Cleanup": "franchise/chain",
-        "Jose's Plumbing Service": "no website",
         "Capital City Drain Pros": "too few reviews",
         "Big D Heating & Air": "outside target area",
         "Old Town Plumbing": "closed",
     }
     counts = await db.business_counts(result.id)
-    assert counts == {"selected": 3, "scored": 1, "rejected": 5}
+    assert counts == {"selected": 3, "scored": 2, "rejected": 4}
 
 
 async def test_pipeline_resume_from_score(env):
@@ -255,8 +254,8 @@ class _PlacesFixtureTransport(FixtureTransport):
 async def test_registry_records_are_matched_to_google_maps(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fixtures_dir: Path
 ):
-    """Registry rows have no website/reviews; with a Maps key they are matched to their listing in the
-    enrich stage, after which the website and review rules apply normally."""
+    """Registry rows have no website/reviews. Places runs after scoring, only on the shortlist;
+    then website and review rules apply to the businesses that were looked up."""
     from zaheendata.models import SourceKind
     from zaheendata.sources.csv_import import CsvImportSource
 
@@ -283,10 +282,13 @@ async def test_registry_records_are_matched_to_google_maps(
     await http.aclose()
 
     assert result.state == CampaignState.COMPLETED
-    assert result.stats["maps_match_pending"] == 3  # every registry row waited for Maps before rules
     assert result.stats["filter_rejections"] == {"franchise/chain": 1}
+    assert result.stats["maps_stage"] == "ok"
+    assert result.stats["maps_pool"] == 2  # shortlist only; franchise already dropped
     assert result.stats["maps_matched"] == 1
     assert "website_filter_skipped" not in result.stats
+    # collect must not have searched Places (those queries look like "plumber in Austin, TX")
+    assert not any(" in " in q.lower() for q in transport.text_queries)
     # one lookup per deferred business, named after the registry record
     lookups = sorted(q.upper() for q in transport.text_queries if " IN " not in q.upper())
     assert lookups == [
@@ -304,6 +306,47 @@ async def test_registry_records_are_matched_to_google_maps(
     lone = next(b for b in rejected if b.name.startswith("LONE STAR"))
     assert lone.rejection_reason == "no website" and lone.attributes["maps_match"] == "none"
     await db.close()
+
+
+async def test_places_is_not_called_until_maps_stage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fixtures_dir: Path
+):
+    """A Google key does not trigger Places during collect/enrich. Stop after score for a free pass."""
+    from zaheendata.models import SourceKind
+    from zaheendata.sources.csv_import import CsvImportSource
+
+    monkeypatch.setenv("ZAHEEN_GOOGLE_MAPS_API_KEY", "k")
+    get_settings.cache_clear()
+    settings = get_settings()
+    db = Database(settings)
+    await db.init()
+    transport = _PlacesFixtureTransport(fixtures_dir)
+    http = HttpClient(settings, cache=ResponseCache(tmp_path / "cache.sqlite", 60), transport=transport)
+    csv_path = tmp_path / "registry.csv"
+    csv_path.write_text(REGISTRY_CSV)
+    ctx = SourceContext(http=http, settings=settings)
+    spec = CampaignSpec(
+        name="free",
+        subsector_key="plumbing_hvac",
+        geography=GeographySpec(locations=["Austin, TX"]),
+        sources=["google_places"],
+        contact_enrichment=False,
+    )
+    campaign = await db.create_campaign(spec)
+    source = CsvImportSource(ctx, csv_path, "registry:test", kind=SourceKind.REGISTRY)
+    result = await CampaignRunner(db, http, settings, extra_sources=[source]).run(
+        campaign, stop_after="score"
+    )
+    await http.aclose()
+    assert result.stats.get("maps_stage") is None
+    assert transport.text_queries == []
+    selected = await db.list_businesses(result.id, status=BusinessStatus.SELECTED)
+    assert {b.name for b in selected} == {
+        "HILL COUNTRY PLUMBING AND AIR LLC",
+        "LONE STAR MECHANICAL SERVICES LLC",
+    }
+    await db.close()
+    get_settings.cache_clear()
 
 
 async def test_beauty_salon_campaign_uses_subsector_rule(env):

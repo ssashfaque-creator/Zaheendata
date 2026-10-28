@@ -17,12 +17,16 @@ Maps and trade directories – then applies the four-step method from the sub-se
 Every stage is persisted, resumable, rate-limited, cached, logged and costed.
 
 ```
-sources ──▶ collect ──▶ resolve ──▶ filter ──▶ enrich ──▶ score ──▶ contacts ──▶ export
- registries  raw rows    entity      poor-fit   maps match 5 signals  owner        CSV/XLSX/
- licences    per source  resolution  removal    website    0–10       email/phone  JSON/API
- maps                    (dedupe)               reviews
- directories                                    tech stack
+sources ──▶ collect ──▶ resolve ──▶ filter ──▶ enrich ──▶ score ──▶ maps ──▶ contacts ──▶ export
+ registries  raw rows    entity      franchise  crawl any  5 signals   Google     owner        CSV/XLSX/
+ licences    per source  resolution  geo/closed website    shortlist   Places     email/phone  JSON/API
+                                         we already have              on the
+                                                                      shortlist only
 ```
+
+Google Places is optional and **deferred**: the long list, website crawl and first shortlist are free.
+Stop after scoring (`zaheen campaign run <id> --stop-after score`) and resume Maps later
+(`--start-stage maps`) once a key is in `.env`.
 
 ## Quick start
 

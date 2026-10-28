@@ -79,12 +79,15 @@ State extracts) are merged into any campaign with `zaheen campaign run <id> --im
 - **Text Search** `POST places:searchText` with `textQuery` ("plumber in Austin, TX") and a
   `locationBias` circle per search cell; 20 results per page, 3 pages, field mask limited to what
   we store. ≈ $32 per 1,000 requests.
-- **Registry → Maps matching.** Registry rows have no website or reviews, so during the enrich
-  stage every candidate without a place id is looked up once by name + city + state and accepted
-  only when the name is a close fuzzy match (`token_set_ratio ≥ 82`) and the state agrees. The
-  website, phone, rating, review count, status and place id are attached; the website and
-  `<10 reviews` rules are applied afterwards. Cost: one text search per unmatched business
-  (≈ $13 for a 400-business long list).
+- **Deferred until the shortlist.** Collect and enrich do not call Places (`ZAHEEN_DEFER_GOOGLE_PLACES`,
+  default on). The engine crawls any website already on the registry record, scores, and keeps the
+  top N. The **maps** stage then looks up only that shortlist (plus a small overflow,
+  `short_list_target × ZAHEEN_GOOGLE_PLACES_SHORTLIST_MULTIPLIER`) by name + city + state. A
+  candidate is accepted when the name is a close fuzzy match (`token_set_ratio ≥ 82`) and the
+  state agrees. Newly found websites are crawled immediately; then the website and `<10 reviews`
+  rules run on those lookups and the shortlist is re-ranked. Cost: ~200 text searches for a
+  100-lead shortlist, not thousands. Free pass: `zaheen campaign run <id> --stop-after score`,
+  later `zaheen campaign run <id> --start-stage maps`.
 - **Place Details (legacy endpoint)** for `reviews` with `reviews_sort=newest`, `rating`,
   `user_ratings_total`, `business_status`. ≈ $20 per 1,000.
 - Responses are cached on disk (`ZAHEEN_HTTP_CACHE_TTL_SECONDS`, default 7 days).

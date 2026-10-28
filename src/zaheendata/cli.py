@@ -314,7 +314,9 @@ def _progress(stage: str, data: dict[str, Any]) -> None:
 def campaign_run(
     campaign_id: str,
     start_stage: str = typer.Option("collect", help=f"One of {STAGES}"),
-    stop_after: str | None = typer.Option(None),
+    stop_after: str | None = typer.Option(
+        None, help=f"Stop after this stage ({', '.join(STAGES)}). Use 'score' to skip Google Places."
+    ),
     import_file: list[Path] | None = typer.Option(
         None, "--import", help="CSV/XLSX files (registry extracts, member lists) to merge in"
     ),

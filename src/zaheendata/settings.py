@@ -42,6 +42,15 @@ class Settings(BaseSettings):
         default=0.35,
         description="Places API (New) QPS. Default stays under Google's 60 QPM starter quota.",
     )
+    defer_google_places: bool = Field(
+        default=True,
+        description="Do not call Places during collect/enrich. Crawl websites first, shortlist, then Maps.",
+    )
+    google_places_shortlist_multiplier: int = Field(
+        default=2,
+        ge=1,
+        description="Maps lookups on the shortlist pool: short_list_target × this (200 for a 100-lead list).",
+    )
     respect_robots_txt: bool = True
     website_max_pages: int = 6
     website_max_bytes: int = 2_000_000

@@ -159,7 +159,7 @@ class Geocoder:
 
     async def geocode_detailed(self, text: str) -> tuple[GeoPoint, str | None] | None:
         """Return (point, county) where county is normalised like "Travis" (no "County" suffix)."""
-        key = self.settings.secret("google_maps_api_key")
+        key = None if self.settings.defer_google_places else self.settings.secret("google_maps_api_key")
         if key:
             data = await self.http.get_json(
                 "https://maps.googleapis.com/maps/api/geocode/json",

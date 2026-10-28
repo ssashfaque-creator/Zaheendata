@@ -2,7 +2,7 @@
 
 ```
                  ┌──────────────────────── CampaignRunner (pipeline.py) ────────────────────────┐
-                 │ collect → resolve → filter → enrich → score → contacts → finalize            │
+                 │ collect → resolve → filter → enrich → score → maps → contacts → finalize     │
                  └──────────────────────────────────────────────────────────────────────────────┘
    GeoPlanner            Sources              resolve.py     filters.py   enrich/*      scoring.py   export.py
    (geo.py)        (sources/registry.py)      union-find     franchise    crawler       5 signals    CSV/XLSX/JSON
@@ -52,22 +52,21 @@
 
 ## Pipeline semantics
 
-- **collect** fans out `sources × cells`. Maps-type sources run per geographic cell; registries,
-  imports and licence rolls run once per region (narrowed by city or geocoded county where the
-  dataset has such a column). Raw records are flushed to `raw_records` in batches; collection
-  stops expanding once unique keys exceed 1.6 × long-list target. One failing source is logged in
-  `stats.source_errors` and never aborts the run.
+- **collect** fans out `sources × cells`. Yelp/OSM run per geographic cell; registries, imports and
+  licence rolls run once per region. **Google Places is skipped here by default**
+  (`ZAHEEN_DEFER_GOOGLE_PLACES=true`) so the long list is free. Collection stops expanding once
+  unique keys exceed 1.6 × long-list target. One failing source is logged in `stats.source_errors`
+  and never aborts the run.
 - **resolve** rebuilds `businesses` from all raw records (idempotent).
-- **filter** applies the poor-fit rules. Registry rows carry no website or review count, so when
-  Google Places is configured those two rules are *deferred* (`stats.maps_match_pending`) and
-  re-evaluated after enrichment; without a Maps source they are skipped and the business is
-  flagged (`website_filter_skipped`, `review_filter_skipped`) instead of silently rejected.
-- **enrich** first matches registry-only businesses to their Google Maps listing
-  (`GooglePlacesSource.match_business`, fuzzy name ≥ 82 within the same state), merges the listing
-  via `resolve.attach_record`, then crawls the website and classifies reviews.
-- **score / contacts** update businesses in place; status moves
-  `candidate → rejected | scored | selected`. Owner lookup runs only for the selected shortlist,
-  then re-ranks within it.
+- **filter** applies franchise / closed / geography. Website and Google-review rules are deferred
+  until a URL exists or the maps stage has looked the listing up.
+- **enrich** crawls every website already on the record and extracts all site fields (booking,
+  quote forms, tech stack, owner names, franchise language). No Places calls.
+- **score** ranks on those fields and keeps the shortlist (top N).
+- **maps** (optional) matches only the shortlist (plus a small overflow) to Google Places, crawls a
+  newly found website, fetches reviews, applies the website / ≥10-review rules to those lookups,
+  and re-ranks. Resume with `start_stage=maps` after a free `--stop-after score` run.
+- **contacts** owner lookup on the shortlist only, then re-rank within it.
 - Every stage writes `campaign.stage` and `campaign.stats`, so `run(start_stage=...)` resumes
   after a crash or after changing thresholds without re-collecting (and re-paying).
 
@@ -78,8 +77,8 @@
 - **Concurrency:** `ZAHEEN_GLOBAL_CONCURRENCY`, `ZAHEEN_PER_HOST_CONCURRENCY`,
   `ZAHEEN_PER_HOST_REQUESTS_PER_SECOND`; sources can override per host (`HttpClient.set_host_rate`).
 - **Cost control:** the ledger counts paid calls per meter and estimates spend; the response
-  cache prevents repeat billing; contacts run on the shortlist only; `stop_after="filter"` lets you
-  review the long list before paying for enrichment.
+  cache prevents repeat billing; Google Places and owner lookup run on the shortlist only;
+  `stop_after="score"` is a fully free pass, then `--start-stage maps` spends Places quota.
 - **Observability:** structlog (console or JSON), per-stage timings, per-source counts, rejection
   reasons, score distribution in `campaign.stats`; `/health` for probes.
 - **Multi-process cache:** the SQLite response cache is per host; for many workers point
