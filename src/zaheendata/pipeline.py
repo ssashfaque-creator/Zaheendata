@@ -49,7 +49,6 @@ from .sources import Source, SourceContext, build_sources
 from .sources.google_places import GooglePlacesSource
 from .sources.public_datasets import PublicDatasetSource
 from .sources.sam_gov import SamGovSource
-from .sources.yelp import YelpSource
 from .storage import Database
 
 log = get_logger(__name__)
@@ -350,70 +349,44 @@ class CampaignRunner:
         pool = ctx.campaign.spec.long_list_target or self.settings.long_list_target
         candidates = candidates[:pool]
         places = None if self.settings.defer_google_places else self._places(ctx)
-        sam = next((s for s in ctx.sources if isinstance(s, SamGovSource)), None)
-        yelp = next((s for s in ctx.sources if isinstance(s, YelpSource)), None)
         discoverer = DirectoryDiscoverer(self.http, self.settings)
         locs = ctx.campaign.spec.geography.locations
         discoverer.fallback_where = locs[0] if locs else (ctx.campaign.spec.geography.state or "")
-        sem = asyncio.Semaphore(max(4, self.settings.global_concurrency // 2))
-        done = 0
-        discovered = 0
         budget = min(self.settings.website_discover_limit or pool, pool)
+        done = 0
         pending: list[Business] = []
         pending_lock = asyncio.Lock()
+        phase = ["census"]
         await self._emit(
             "enrich.start",
             total=len(candidates),
             discover_budget=budget,
-            note="heartbeat every 20s; first company talks to Census/OSM/DuckDuckGo",
+            note="census batch, then OSM, then crawl known sites while DuckDuckGo fills the rest",
         )
         beat_stop = asyncio.Event()
 
         async def heartbeat() -> None:
             while True:
                 try:
-                    await asyncio.wait_for(beat_stop.wait(), timeout=20.0)
+                    await asyncio.wait_for(beat_stop.wait(), timeout=15.0)
                     return
                 except TimeoutError:
                     await self._emit(
                         "enrich.working",
                         done=done,
                         total=len(candidates),
-                        note="still calling Census, OSM, DuckDuckGo, or crawling",
+                        phase=phase[0],
                     )
 
-        async def enrich_one(b: Business) -> None:
-            nonlocal done, discovered
-            async with sem:
-                await self._emit("enrich.company", name=b.name)
-                needs = not b.website or not (b.address and b.address.line1) or not b.phone_e164
-                if needs and discovered < budget:
-                    discovered += 1
-                    city, region = self._place_parts(b, discoverer.fallback_where)
-                    if sam is not None:
-                        try:
-                            rec = await sam.find_entity(b.name, region)
-                            if rec is not None:
-                                attach_record(b, rec)
-                        except Exception as exc:  # noqa: BLE001
-                            log.debug("enrich.sam_failed", business=b.name, error=str(exc)[:200])
-                    if yelp is not None and (not b.phone_e164 or b.review_count is None):
-                        try:
-                            rec = await yelp.match_business(b.name, city, region)
-                            if rec is not None:
-                                attach_record(b, rec)
-                        except Exception as exc:  # noqa: BLE001
-                            log.debug("enrich.yelp_failed", business=b.name, error=str(exc)[:200])
-                    await discoverer.fill(b)
-                await self._enrich_business(b, places)
-                harvest_from_website(b)
+        async def persist(b: Business) -> None:
+            nonlocal done
             async with pending_lock:
                 pending.append(b)
                 done += 1
+                progress = done
                 flush = pending[:] if len(pending) >= 10 else []
                 if flush:
                     pending.clear()
-                progress = done
             if flush:
                 await self.db.upsert_businesses(flush)
             if progress == 1 or progress % 5 == 0 or progress == len(candidates):
@@ -424,11 +397,62 @@ class CampaignRunner:
                     name=b.name,
                     website=b.website or "-",
                     phone=b.phone_e164 or "-",
+                    phase=phase[0],
                 )
+
+        crawl_sem = asyncio.Semaphore(max(8, self.settings.global_concurrency))
+
+        async def crawl_one(b: Business) -> None:
+            async with crawl_sem:
+                await self._enrich_business(b, places)
+                harvest_from_website(b)
+            await persist(b)
 
         beat_task = asyncio.create_task(heartbeat())
         try:
-            await asyncio.gather(*(enrich_one(b) for b in candidates))
+            geocoded = await discoverer.geocode_batch(candidates)
+            await self._emit("enrich.phase", phase="census_batch", geocoded=geocoded)
+
+            phase[0] = "photon"
+            photon_targets = [
+                b
+                for b in candidates
+                if not b.website
+                or not b.phone_e164
+                or not (b.address and b.address.line1)
+                or b.location is None
+            ]
+            photon_n = await discoverer.fill_photon_many(photon_targets)
+            await self._emit("enrich.phase", phase="photon", filled=photon_n)
+
+            phase[0] = "osm_contacts"
+            osm_n = await discoverer.apply_osm_contacts(candidates)
+            await self._emit("enrich.phase", phase="osm_contacts", filled=osm_n)
+
+            known = [b for b in candidates if b.website]
+            unknown = [b for b in candidates if not b.website][:budget]
+            skip_ids = {b.id for b in known} | {b.id for b in unknown}
+            leftover = [b for b in candidates if b.id not in skip_ids]
+            phase[0] = "crawl_and_search"
+            await self._emit(
+                "enrich.phase",
+                phase="crawl_and_search",
+                crawl_now=len(known),
+                duckduckgo=len(unknown),
+            )
+
+            async def discover_web(b: Business) -> None:
+                await discoverer.fill_website(b)
+                if b.website:
+                    await crawl_one(b)
+                else:
+                    await persist(b)
+
+            await asyncio.gather(
+                *(crawl_one(b) for b in known),
+                *(discover_web(b) for b in unknown),
+                *(persist(b) for b in leftover),
+            )
         finally:
             beat_stop.set()
             await beat_task
@@ -497,7 +521,7 @@ class CampaignRunner:
             except Exception as exc:  # noqa: BLE001
                 log.debug("enrich.reviews_failed", business=b.name, error=str(exc))
         b.review_insights = self.reviews.analyse(b.reviews)
-        if b.website:
+        if b.website and not (b.website_features.crawled and b.website_features.pages_crawled):
             try:
                 pages = await self.crawler.crawl(b.website)
                 b.website_features = extract_features(pages, b.domain)

@@ -506,6 +506,8 @@ class WebsiteCrawler:
                     url,
                     check_robots=len(pages) > 0,
                     max_bytes=self.settings.website_max_bytes,
+                    retries=1,
+                    timeout_seconds=self.settings.website_fetch_timeout_seconds,
                     headers=None
                     if len(pages)
                     else {

@@ -1,18 +1,23 @@
 """Free discovery of website, address and phone before Google Places runs.
 
 Used in the enrich stage so a registry-only long list (often just a legal name) can still be
-crawled and scored. Sources, in order: Nominatim (OSM), SAM.gov, Yelp, DuckDuckGo HTML search.
+crawled and scored. Census batch geocodes streets in one call; Photon finds the OSM POI;
+Overpass pulls website/phone tags for those OSM ids together; DuckDuckGo fills remaining
+websites. Nominatim is a fail-fast last resort only.
 """
 
 from __future__ import annotations
 
+import asyncio
+import csv
+import io
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from bs4 import BeautifulSoup
 from rapidfuzz import fuzz
 
-from ..http import HttpClient
+from ..http import HostPaused, HttpClient
 from ..logging import get_logger
 from ..models import Address, Business, GeoPoint, OwnerContact
 from ..normalize import (
@@ -28,8 +33,10 @@ from .website import WebsiteFeatures
 log = get_logger(__name__)
 
 DDG_URL = "https://html.duckduckgo.com/html/"
+DDG_LITE_URL = "https://lite.duckduckgo.com/lite/"
 PHOTON_URL = "https://photon.komoot.io/api/"
 CENSUS_GEOCODER_URL = "https://geocoding.geo.census.gov/geocoder/locations/address"
+CENSUS_BATCH_URL = "https://geocoding.geo.census.gov/geocoder/locations/addressbatch"
 WEBSITE_MATCH_THRESHOLD = 55
 NOMINATIM_MATCH_THRESHOLD = 80
 PHOTON_MATCH_THRESHOLD = 85
@@ -219,6 +226,38 @@ def census_point(payload: dict[str, Any]) -> GeoPoint | None:
     return GeoPoint(lat=float(coords["y"]), lng=float(coords["x"]))
 
 
+def parse_census_batch(text: str) -> dict[str, GeoPoint]:
+    """Map unique id -> point from a Census addressbatch CSV body."""
+    out: dict[str, GeoPoint] = {}
+    if not text or not text.strip():
+        return out
+    reader = csv.reader(io.StringIO(text))
+    for row in reader:
+        if len(row) < 6:
+            continue
+        status = (row[2] or "").strip()
+        if status.lower() != "match":
+            continue
+        coords = (row[5] or "").strip()
+        if "," not in coords:
+            continue
+        lon_s, lat_s = (p.strip() for p in coords.split(",", 1))
+        try:
+            out[row[0].strip()] = GeoPoint(lat=float(lat_s), lng=float(lon_s))
+        except ValueError:
+            continue
+    return out
+
+
+def _osm_ref(osm_type: object, osm_id: object) -> tuple[str, int] | None:
+    kind = {"N": "node", "W": "way", "R": "relation"}.get(str(osm_type or "")[:1].upper())
+    try:
+        oid = int(osm_id)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return (kind, oid) if kind else None
+
+
 def photon_pick(
     business_name: str, city: str | None, region: str | None, features: list[dict[str, Any]]
 ) -> dict[str, Any] | None:
@@ -290,12 +329,21 @@ class DirectoryDiscoverer:
         self.http = http
         self.settings = settings or get_settings()
         self.fallback_where = ""
-        self.http.set_host_rate("html.duckduckgo.com", 0.5, concurrency=1)
-        self.http.set_host_rate("photon.komoot.io", 1.0, concurrency=1)
-        self.http.set_host_rate("geocoding.geo.census.gov", 1.0, concurrency=1)
+        # Photon and Census can run several at once. DuckDuckGo stays at 1 conn/host; we split
+        # html vs lite so website search is ~2/s without doubling up on one endpoint.
+        self.http.set_host_rate("html.duckduckgo.com", 1.0, concurrency=1)
+        self.http.set_host_rate("lite.duckduckgo.com", 1.0, concurrency=1)
+        self.http.set_host_rate("photon.komoot.io", 3.0, concurrency=3)
+        self.http.set_host_rate("geocoding.geo.census.gov", 4.0, concurrency=4)
         host = urlparse(self.settings.nominatim_url).netloc
         if host:
-            self.http.set_host_rate(host, 0.8, concurrency=1)
+            self.http.set_host_rate(host, 1.0, concurrency=1)
+
+    def _fast(self) -> dict[str, Any]:
+        return {
+            "timeout_seconds": self.settings.discover_timeout_seconds,
+            "retries": self.settings.discover_retries,
+        }
 
     def _where(self, b: Business) -> str:
         addr = b.address
@@ -305,40 +353,199 @@ class DirectoryDiscoverer:
         return built or self.fallback_where
 
     async def fill(self, b: Business) -> dict[str, str]:
-        """Best-effort fill. Returns a map of which fields came from which source."""
+        """Best-effort fill. Census, Photon and DuckDuckGo run together; Nominatim is last resort."""
         found: dict[str, str] = {}
-        addr = b.address
-        if addr and addr.line1 and b.location is None:
+
+        async def census() -> None:
             try:
                 if await self._census(b):
                     found["geo"] = "census"
             except Exception as exc:  # noqa: BLE001
                 log.debug("discover.census_failed", name=b.name, error=str(exc)[:200])
-        try:
-            if await self._photon(b):
-                found.setdefault("poi", "photon")
-        except Exception as exc:  # noqa: BLE001
-            log.debug("discover.photon_failed", name=b.name, error=str(exc)[:200])
-        if addr and addr.line1:
+
+        async def photon() -> None:
+            try:
+                if await self._photon(b):
+                    found["poi"] = "photon"
+            except Exception as exc:  # noqa: BLE001
+                log.debug("discover.photon_failed", name=b.name, error=str(exc)[:200])
+
+        async def ddg() -> None:
+            if await self.fill_website(b):
+                found["website"] = b.attributes.get("website_source") or "duckduckgo"
+
+        await asyncio.gather(census(), photon(), ddg(), return_exceptions=True)
+        # Photon already queried OSM. Nominatim is only for rows Photon missed entirely.
+        if (
+            not b.website
+            and not b.phone_e164
+            and not b.attributes.get("osm_id")
+            and not self.http.is_paused(urlparse(self.settings.nominatim_url).netloc)
+        ):
             try:
                 if await self._nominatim(b):
                     found.setdefault("geo", "nominatim")
+                    if b.website:
+                        found.setdefault("website", "nominatim")
+            except HostPaused:
+                pass
             except Exception as exc:  # noqa: BLE001
                 log.debug("discover.nominatim_failed", name=b.name, error=str(exc)[:200])
-        if not b.website:
-            try:
-                url = await self._duckduckgo(b)
-            except Exception as exc:  # noqa: BLE001
-                log.debug("discover.ddg_failed", name=b.name, error=str(exc)[:200])
-                url = None
-            if url:
-                b.website = url
-                b.domain = extract_domain(url)
-                b.attributes["website_source"] = "duckduckgo"
-                found["website"] = "duckduckgo"
         if found:
             log.info("discover.filled", name=b.name, **found)
         return found
+
+    async def geocode_batch(self, businesses: list[Business]) -> int:
+        """One Census addressbatch call for every record that has a street and no lat/lng."""
+        need = [b for b in businesses if b.location is None and b.address and b.address.line1]
+        if not need:
+            return 0
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        for b in need:
+            addr = b.address
+            assert addr is not None
+            writer.writerow(
+                [b.id, addr.line1 or "", addr.city or "", addr.region or "", addr.postal_code or ""]
+            )
+        try:
+            resp = await self.http.post(
+                CENSUS_BATCH_URL,
+                data={"benchmark": "Public_AR_Current"},
+                files={"addressFile": ("addresses.csv", buf.getvalue(), "text/csv")},
+                timeout_seconds=45.0,
+                retries=1,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("discover.census_batch_failed", error=str(exc)[:200])
+            filled = 0
+            async def one(b: Business) -> None:
+                nonlocal filled
+                try:
+                    if await self._census(b):
+                        filled += 1
+                except Exception as err:  # noqa: BLE001
+                    log.debug("discover.census_failed", name=b.name, error=str(err)[:200])
+
+            await asyncio.gather(*(one(b) for b in need), return_exceptions=True)
+            return filled
+        if resp.status_code >= 400:
+            log.debug("discover.census_batch_status", status=resp.status_code)
+            return 0
+        points = parse_census_batch(resp.text)
+        n = 0
+        for b in need:
+            point = points.get(b.id)
+            if point is None:
+                continue
+            b.location = point
+            b.attributes["geo_source"] = "census"
+            n += 1
+        log.info("discover.census_batch", submitted=len(need), matched=n)
+        return n
+
+    async def fill_photon_many(self, businesses: list[Business]) -> int:
+        filled = 0
+
+        async def one(b: Business) -> None:
+            nonlocal filled
+            try:
+                if await self._photon(b):
+                    filled += 1
+            except Exception as exc:  # noqa: BLE001
+                log.debug("discover.photon_failed", name=b.name, error=str(exc)[:200])
+
+        await asyncio.gather(*(one(b) for b in businesses), return_exceptions=True)
+        return filled
+
+    async def fill_website(self, b: Business) -> bool:
+        if b.website:
+            return False
+        try:
+            url = await self._duckduckgo(b)
+        except HostPaused:
+            return False
+        except Exception as exc:  # noqa: BLE001
+            log.debug("discover.ddg_failed", name=b.name, error=str(exc)[:200])
+            return False
+        if not url:
+            return False
+        b.website = url
+        b.domain = extract_domain(url)
+        b.attributes["website_source"] = "duckduckgo"
+        return True
+
+    async def apply_osm_contacts(self, businesses: list[Business]) -> int:
+        """One Overpass lookup for Photon OSM ids — website/phone tags without per-row Nominatim."""
+        by_ref: dict[tuple[str, int], list[Business]] = {}
+        for b in businesses:
+            if b.website and b.phone_e164:
+                continue
+            ref = _osm_ref(b.attributes.get("osm_type"), b.attributes.get("osm_id"))
+            if ref is None:
+                continue
+            by_ref.setdefault(ref, []).append(b)
+        if not by_ref:
+            return 0
+        refs = list(by_ref)
+        filled = 0
+        for i in range(0, len(refs), 80):
+            chunk = refs[i : i + 80]
+            data = await self._overpass_ids(chunk)
+            for el in data.get("elements") or []:
+                kind = str(el.get("type") or "")
+                try:
+                    oid = int(el.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                tags = el.get("tags") or {}
+                for b in by_ref.get((kind, oid), []):
+                    changed = False
+                    if not b.website:
+                        url = normalize_url(tags.get("website") or tags.get("contact:website"))
+                        if url and not is_social_or_directory_url(url):
+                            b.website = url
+                            b.domain = extract_domain(url)
+                            b.attributes["website_source"] = "osm"
+                            changed = True
+                    if not b.phone_e164:
+                        e164 = normalize_phone(tags.get("phone") or tags.get("contact:phone"))
+                        if e164:
+                            b.phone_e164 = e164
+                            changed = True
+                    if changed:
+                        filled += 1
+        if filled:
+            log.info("discover.osm_contacts", filled=filled, refs=len(refs))
+        return filled
+
+    async def _overpass_ids(self, refs: list[tuple[str, int]]) -> dict[str, Any]:
+        parts: list[str] = []
+        for kind, group_key in (("node", "node"), ("way", "way"), ("relation", "relation")):
+            ids = [str(oid) for k, oid in refs if k == group_key]
+            if ids:
+                parts.append(f"{kind}(id:{','.join(ids)});")
+        if not parts:
+            return {}
+        query = f"[out:json][timeout:20];({''.join(parts)});out tags;"
+        urls = [self.settings.overpass_url, *self.settings.overpass_fallback_urls]
+        last: Exception | None = None
+        for url in urls:
+            host = urlparse(url).netloc
+            if host:
+                self.http.set_host_rate(host, 0.3, concurrency=1)
+            if self.http.is_paused(host):
+                continue
+            try:
+                data = await self.http.post_json(url, data={"data": query}, retries=1, timeout_seconds=20.0)
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+                log.debug("discover.overpass_failed", url=url, error=str(exc)[:200])
+                continue
+            return data if isinstance(data, dict) else {}
+        if last:
+            log.warning("discover.overpass_giveup", error=str(last)[:200])
+        return {}
 
     async def _census(self, b: Business) -> bool:
         addr = b.address
@@ -354,6 +561,7 @@ class DirectoryDiscoverer:
                 "benchmark": "Public_AR_Current",
                 "format": "json",
             },
+            **self._fast(),
         )
         point = census_point(data if isinstance(data, dict) else {})
         if point is None:
@@ -367,7 +575,9 @@ class DirectoryDiscoverer:
         query = f"{b.name} {where}".strip()
         if not query:
             return False
-        data = await self.http.get_json(PHOTON_URL, params={"q": query, "limit": 5, "lang": "en"})
+        data = await self.http.get_json(
+            PHOTON_URL, params={"q": query, "limit": 5, "lang": "en"}, **self._fast()
+        )
         features = data.get("features") if isinstance(data, dict) else None
         city, region = (b.address.city if b.address else None), (b.address.region if b.address else None)
         if not city and "," in where:
@@ -394,34 +604,14 @@ class DirectoryDiscoverer:
         if props.get("postcode") and not cur.postal_code:
             cur.postal_code = str(props["postcode"])
             changed = True
+        osm_type, osm_id = props.get("osm_type"), props.get("osm_id")
+        if osm_type and osm_id:
+            b.attributes["osm_type"] = str(osm_type)
+            b.attributes["osm_id"] = osm_id
         if changed:
             b.address = cur
             b.attributes["poi_source"] = "photon"
-        osm_type, osm_id = props.get("osm_type"), props.get("osm_id")
-        if osm_type and osm_id and (not b.website or not b.phone_e164):
-            prefix = {"N": "N", "W": "W", "R": "R"}.get(str(osm_type)[0].upper(), "N")
-            try:
-                rows = await self.http.get_json(
-                    f"{self.settings.nominatim_url}/lookup",
-                    params={"osm_ids": f"{prefix}{osm_id}", "format": "json", "extratags": 1},
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.debug("discover.photon_lookup_failed", error=str(exc)[:200])
-                rows = []
-            extra = (rows[0].get("extratags") or {}) if isinstance(rows, list) and rows else {}
-            if not b.website:
-                url = normalize_url(extra.get("website") or extra.get("contact:website"))
-                if url and not is_social_or_directory_url(url):
-                    b.website = url
-                    b.domain = extract_domain(url)
-                    b.attributes["website_source"] = "osm"
-                    changed = True
-            if not b.phone_e164:
-                e164 = normalize_phone(extra.get("phone") or extra.get("contact:phone"))
-                if e164:
-                    b.phone_e164 = e164
-                    changed = True
-        return changed
+        return bool(changed or osm_id)
 
     async def _nominatim(self, b: Business) -> bool:
         query = " ".join(p for p in (b.name, self._where(b)) if p).strip()
@@ -437,6 +627,7 @@ class DirectoryDiscoverer:
                 "addressdetails": 1,
                 "extratags": 1,
             },
+            **self._fast(),
         )
         if not isinstance(data, list) or not data:
             return False
@@ -494,11 +685,22 @@ class DirectoryDiscoverer:
     async def _duckduckgo(self, b: Business) -> str | None:
         where = self._where(b)
         query = f"{b.name} {where} official website".strip()
-        resp = await self.http.get(DDG_URL, params={"q": query}, headers=DDG_HEADERS)
-        if resp.status_code >= 400 or not resp.text:
-            return None
-        urls = parse_ddg_html(resp.text)
-        return pick_website(b.name, urls)
+        primary = DDG_URL if hash(b.name) % 2 == 0 else DDG_LITE_URL
+        other = DDG_LITE_URL if primary == DDG_URL else DDG_URL
+        for url in (primary, other):
+            host = urlparse(url).netloc
+            if self.http.is_paused(host):
+                continue
+            try:
+                resp = await self.http.get(url, params={"q": query}, headers=DDG_HEADERS, **self._fast())
+            except HostPaused:
+                continue
+            if resp.status_code >= 400 or not resp.text:
+                continue
+            picked = pick_website(b.name, parse_ddg_html(resp.text))
+            if picked:
+                return picked
+        return None
 
 
 def completeness(b: Business) -> tuple[int, ...]:

@@ -233,6 +233,7 @@ class HttpClient:
         self._host_rates: dict[str, float] = {}
         self._host_cooldown: dict[str, float] = {}
         self._429_streak: dict[str, int] = {}
+        self._fail_streak: dict[str, int] = {}
         self._host_disabled: dict[str, str] = {}
 
     def set_host_rate(self, host: str, requests_per_second: float, concurrency: int | None = None) -> None:
@@ -280,11 +281,12 @@ class HttpClient:
         max_bytes: int | None = None,
         retries: int | None = None,
         timeout_seconds: float | None = None,
+        files: Any | None = None,
     ) -> httpx.Response:
         host = urlsplit(url).netloc
         key = self.cache.fingerprint(method, url, params, json_body or data)
         cache_headers = {k.lower() for k in (headers or {})} & {"authorization", "x-api-key"}
-        cacheable = use_cache and method.upper() in {"GET", "POST"}
+        cacheable = use_cache and files is None and method.upper() in {"GET", "POST"}
         if cacheable:
             hit = await self.cache.get(key if not cache_headers else key + ":auth")
             if hit:
@@ -307,10 +309,17 @@ class HttpClient:
                 await asyncio.sleep(min(cooldown, 120))
             async with self._global, self._sem(host):
                 await self._bucket(host).acquire()
+                req_timeout = timeout_seconds
                 if max_bytes:
-                    async with self._client.stream(
-                        method, url, params=params, json=json_body, data=data, headers=headers
-                    ) as stream:
+                    stream_kw: dict[str, Any] = {
+                        "params": params,
+                        "json": json_body,
+                        "data": data,
+                        "headers": headers,
+                    }
+                    if req_timeout is not None:
+                        stream_kw["timeout"] = req_timeout
+                    async with self._client.stream(method, url, **stream_kw) as stream:
                         chunks: list[bytes] = []
                         size = 0
                         async for chunk in stream.aiter_bytes():
@@ -331,11 +340,14 @@ class HttpClient:
                         "data": data,
                         "headers": headers,
                     }
-                    if timeout_seconds is not None:
-                        req_kw["timeout"] = timeout_seconds
+                    if files is not None:
+                        req_kw["files"] = files
+                    if req_timeout is not None:
+                        req_kw["timeout"] = req_timeout
                     resp = await self._client.request(method, url, **req_kw)
             if 200 <= resp.status_code < 400:
                 self._429_streak[host] = 0
+                self._fail_streak[host] = 0
             if resp.status_code in (408, 425, 429, 500, 502, 503, 504):
                 wait = parse_retry_after(resp.headers.get("retry-after"))
                 if resp.status_code == 429:
@@ -368,6 +380,9 @@ class HttpClient:
         except RetryError as exc:
             last = exc.last_attempt.exception()
             log.warning("http.giveup", url=redact_url(url), error=str(last) or type(last).__name__)
+            self._fail_streak[host] = self._fail_streak.get(host, 0) + 1
+            if self._fail_streak[host] >= 3:
+                self._disable_host(host, "repeated timeouts or server errors")
             raise last if last else exc
 
         if meter:

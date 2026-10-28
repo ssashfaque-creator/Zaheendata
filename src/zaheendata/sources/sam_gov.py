@@ -172,7 +172,20 @@ class SamGovSource(Source):
             if region:
                 params["physicalAddressProvinceOrStateCode"] = region
             try:
-                data = await self.http.get_json(ENTITIES_URL, params=params, meter="sam_gov.entities")
+                data = await self.http.get_json(
+                    ENTITIES_URL,
+                    params=params,
+                    meter="sam_gov.entities",
+                    retries=1,
+                    timeout_seconds=8.0,
+                )
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code if exc.response is not None else 0
+                if status in {401, 403, 404}:
+                    log.warning("sam_gov.lookup_unavailable", status=status)
+                    return None
+                log.debug("sam_gov.lookup_failed", name=business_name, error=str(exc)[:200])
+                return None
             except Exception as exc:  # noqa: BLE001
                 log.debug("sam_gov.lookup_failed", name=business_name, error=str(exc)[:200])
                 return None

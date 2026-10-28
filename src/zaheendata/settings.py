@@ -39,6 +39,16 @@ class Settings(BaseSettings):
     user_agent: str = "Zaheendata/0.2 (+https://github.com/ssashfaque-creator/Zaheendata; directory research)"
     http_timeout_seconds: float = 20.0
     http_max_retries: int = 4
+    discover_timeout_seconds: float = Field(
+        default=8.0,
+        description="Timeout for Census, Photon, DuckDuckGo and OSM lookups. Fail fast on a dead host.",
+    )
+    discover_retries: int = Field(
+        default=1, ge=1, description="Attempts per discovery request (no long backoff)."
+    )
+    website_fetch_timeout_seconds: float = Field(
+        default=8.0, description="Per-page timeout when crawling a business site."
+    )
     global_concurrency: int = 16
     per_host_concurrency: int = 2
     per_host_requests_per_second: float = 1.0

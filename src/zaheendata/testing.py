@@ -32,6 +32,21 @@ class FixtureTransport(httpx.AsyncBaseTransport):
                 ]
             )
             return httpx.Response(200, content=body.encode(), headers={"content-type": "application/json"})
+        if "photon" in host:
+            return httpx.Response(
+                200, content=b'{"features":[]}', headers={"content-type": "application/json"}
+            )
+        if "geocoding.geo.census.gov" in host:
+            if "addressbatch" in path:
+                return httpx.Response(200, content=b"", headers={"content-type": "text/csv"})
+            body = json.dumps({"result": {"addressMatches": []}})
+            return httpx.Response(200, content=body.encode(), headers={"content-type": "application/json"})
+        if "overpass" in host:
+            return httpx.Response(
+                200, content=b'{"elements":[]}', headers={"content-type": "application/json"}
+            )
+        if "duckduckgo.com" in host:
+            return httpx.Response(200, content=b"<html></html>", headers={"content-type": "text/html"})
         if "maps.googleapis.com" in host and path.endswith("/geocode/json"):
             body = json.dumps(
                 {"results": [{"geometry": {"location": {"lat": self.geocode[0], "lng": self.geocode[1]}}}]}
