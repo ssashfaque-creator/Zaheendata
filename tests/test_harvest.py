@@ -192,6 +192,7 @@ def test_harvest_resumes_completed_trade(tmp_path: Path) -> None:
         state_path=state_path,
         log_path=log_path,
         crawl="none",
+        min_full_rows=0,
     )
     assert first["stopped"] is False
     assert first["trades"]["plumbing_hvac"]["status"] == "complete"
@@ -211,6 +212,7 @@ def test_harvest_resumes_completed_trade(tmp_path: Path) -> None:
         state_path=state_path,
         log_path=log_path,
         crawl="none",
+        min_full_rows=0,
     )
     assert second["trades"]["plumbing_hvac"]["status"] == "complete"
     log_text = log_path.read_text(encoding="utf-8")
@@ -253,6 +255,7 @@ def test_harvest_stop_mid_crawl_then_resume(tmp_path: Path, monkeypatch) -> None
         state_path=state_path,
         log_path=log_path,
         crawl="live",
+        min_full_rows=0,
     )
     assert paused["stopped"] is True
     assert "electrical" not in paused["trades"]
@@ -268,10 +271,39 @@ def test_harvest_stop_mid_crawl_then_resume(tmp_path: Path, monkeypatch) -> None
         state_path=state_path,
         log_path=log_path,
         crawl="live",
+        min_full_rows=0,
     )
     assert resumed["stopped"] is False
     assert resumed["trades"]["electrical"]["status"] == "complete"
     assert calls["n"] >= 2
+
+
+def test_harvest_refetches_smoke_sample_parquet(tmp_path: Path, monkeypatch) -> None:
+    raw = tmp_path / "raw"
+    _seed_raw(raw)
+    called: dict[str, object] = {}
+
+    def fake_download(**kwargs):
+        called["limit"] = kwargs.get("limit")
+        called["refetch"] = kwargs.get("refetch")
+        return kwargs["out"]
+
+    monkeypatch.setattr("zaheendata.pipeline.harvest.download_overture", fake_download)
+    harvest(
+        geo="TX",
+        subsector_keys=["plumbing_hvac"],
+        warehouse=tmp_path / "warehouse.duckdb",
+        raw_dir=raw,
+        out_dir=tmp_path / "exports",
+        state_path=tmp_path / "harvest_state.json",
+        log_path=tmp_path / "harvest.log",
+        crawl="none",
+        min_full_rows=100,
+    )
+    assert called["limit"] is None
+    assert called["refetch"] is True
+    log_text = (tmp_path / "harvest.log").read_text(encoding="utf-8")
+    assert "smoke-test sample" in log_text
 
 
 def test_reset_warehouse_deletes_db(tmp_path: Path) -> None:

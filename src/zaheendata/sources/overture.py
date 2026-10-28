@@ -9,17 +9,21 @@ from zaheendata.geo import resolve_bbox
 from zaheendata.subsectors import SUBSECTORS, Subsector, get_subsector
 
 
-def parquet_file_ready(path: Path) -> bool:
+def parquet_row_count(path: Path) -> int:
     if not path.exists() or path.stat().st_size < 64:
-        return False
+        return 0
     con = duckdb.connect()
     try:
         count = con.execute("SELECT count(*) FROM read_parquet(?)", [path.as_posix()]).fetchone()[0]
-        return int(count) > 0
+        return int(count)
     except duckdb.Error:
-        return False
+        return 0
     finally:
         con.close()
+
+
+def parquet_file_ready(path: Path) -> bool:
+    return parquet_row_count(path) > 0
 
 
 OVERTURE_RELEASE = os.environ.get("OVERTURE_RELEASE", "2026-10-21.0")

@@ -88,7 +88,11 @@ def build_parser() -> argparse.ArgumentParser:
     harvest_cmd.add_argument("--raw-dir", type=Path, default=Path("data/raw"))
     harvest_cmd.add_argument("--out-dir", type=Path, default=Path("data/exports"))
     harvest_cmd.add_argument("--keep", type=int, default=100)
-    harvest_cmd.add_argument("--limit", type=int, help="Cap enrichable sites per trade (smoke test).")
+    harvest_cmd.add_argument(
+        "--limit",
+        type=int,
+        help="Cap crawled sites per trade only. Does not shrink the Overture download.",
+    )
     harvest_cmd.add_argument("--crawl", default="live", help="live or none.")
     harvest_cmd.add_argument("--concurrency", type=int, default=4)
 

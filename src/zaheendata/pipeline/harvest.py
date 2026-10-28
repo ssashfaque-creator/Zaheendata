@@ -21,7 +21,11 @@ from zaheendata.pipeline.ingest import (
 )
 from zaheendata.pipeline.score import rank_leads, score_lead
 from zaheendata.sources.licenses_catalog import soda_source_keys
-from zaheendata.sources.overture import parquet_file_ready
+from zaheendata.sources.overture import parquet_file_ready, parquet_row_count
+
+# Statewide Texas across 17 trades is tens of thousands of places.
+# A leftover `--limit` smoke parquet is a few rows and must not be reused.
+MIN_FULL_PLACES = 100
 from zaheendata.subsectors import SUBSECTORS, get_subsector
 from zaheendata.warehouse import reset_warehouse, warehouse_stats
 
@@ -72,6 +76,7 @@ def harvest(
     concurrency: int = 4,
     fresh: bool = False,
     refetch: bool = False,
+    min_full_rows: int = MIN_FULL_PLACES,
 ) -> dict:
     keys = ordered_subsectors(subsector_keys)
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -112,7 +117,16 @@ def harvest(
     }
 
     try:
-        _download_places(geo, raw_dir, limit, refetch, state, progress, stop, summary)
+        _download_places(
+            geo,
+            raw_dir,
+            refetch=refetch,
+            min_full_rows=min_full_rows,
+            state=state,
+            progress=progress,
+            stop=stop,
+            summary=summary,
+        )
         _download_licenses(geo, raw_dir, refetch, state, progress, stop, summary)
         _ingest(geo, raw_dir, warehouse, state, progress, stop, summary)
         for key in keys:
@@ -154,8 +168,9 @@ def harvest(
 def _download_places(
     geo: str,
     raw_dir: Path,
-    limit: int | None,
+    *,
     refetch: bool,
+    min_full_rows: int,
     state: HarvestState,
     progress: ProgressLog,
     stop: StopFlag,
@@ -163,21 +178,29 @@ def _download_places(
 ) -> Path:
     dest = raw_dir / f"{parquet_stem(geo, None)}.parquet"
     info = state.data.setdefault("overture", {})
-    if not refetch and parquet_file_ready(dest):
-        info.update({"status": "ready", "path": str(dest), "bytes": dest.stat().st_size})
+    rows = parquet_row_count(dest)
+    sample_leftover = parquet_file_ready(dest) and rows < min_full_rows
+    if sample_leftover:
+        progress.emit(
+            f"overture: {dest} only has {rows} places (smoke-test sample). "
+            "Downloading the full statewide file."
+        )
+    if not refetch and parquet_file_ready(dest) and not sample_leftover:
+        info.update({"status": "ready", "path": str(dest), "bytes": dest.stat().st_size, "places": rows})
         state.save()
-        progress.emit(f"overture: reusing {dest} ({dest.stat().st_size} bytes)")
+        progress.emit(f"overture: reusing {dest} ({rows} places, {dest.stat().st_size} bytes)")
         summary["overture"] = str(dest)
         return dest
     _raise_if_stopped(stop, state, summary)
     state.set_phase("download_places")
     progress.emit(f"overture: downloading all 17 trades for {geo} → {dest}")
-    download_overture(geo=geo, subsector_key=None, raw_dir=raw_dir, limit=limit, out=dest, refetch=True)
-    if not parquet_file_ready(dest):
+    download_overture(geo=geo, subsector_key=None, raw_dir=raw_dir, limit=None, out=dest, refetch=True)
+    rows = parquet_row_count(dest)
+    if rows <= 0:
         raise RuntimeError(f"Overture download did not produce a readable parquet at {dest}")
-    info.update({"status": "ready", "path": str(dest), "bytes": dest.stat().st_size})
+    info.update({"status": "ready", "path": str(dest), "bytes": dest.stat().st_size, "places": rows})
     state.save()
-    progress.emit(f"overture: saved {dest} ({dest.stat().st_size} bytes)")
+    progress.emit(f"overture: saved {dest} ({rows} places, {dest.stat().st_size} bytes)")
     summary["overture"] = str(dest)
     return dest
 

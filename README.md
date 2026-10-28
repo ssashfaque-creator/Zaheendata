@@ -65,7 +65,7 @@ No API key is required for `download` / `build` / `harvest` on Overture. DuckDB 
 One command. It checkpoints after **every website** and after each download/ingest step. Press Ctrl+C whenever you want; the next run of the **same command without `--fresh`** continues from the last saved site.
 
 ```bash
-# First run — wipe the warehouse, keep any already-downloaded parquets
+# First full run. If a 5-row smoke parquet is present, it is replaced automatically.
 caffeinate -dims zaheendata harvest --geo TX --fresh
 
 # Stop anytime with Ctrl+C, then continue:
@@ -76,13 +76,9 @@ tail -f data/harvest.log
 zaheendata stats
 ```
 
-Do **not** pass `--fresh` when resuming. That flag deletes `data/warehouse.duckdb` and `data/harvest_state.json` (downloaded files in `data/raw/` stay). `--refetch` is the only way to re-download Overture/licenses.
+Do **not** pass `--fresh` when resuming. That flag deletes `data/warehouse.duckdb` and `data/harvest_state.json`. Downloaded Overture files are reused only if they look like a full state extract (100+ places). A leftover `--limit` smoke parquet is discarded automatically.
 
-Smoke-test with a handful of sites per trade before the full crawl:
-
-```bash
-zaheendata harvest --geo TX --limit 5
-```
+`--limit` caps **crawls per trade only**. It does not shrink the Overture download. A 5-second harvest with `ingested_places: 5` means the smoke parquet was reused — delete it or rerun after updating, and wait for a file with tens of thousands of places.
 
 Exports land in `data/exports/TX_<trade>.csv`. The DuckDB warehouse is the source of truth if a run is interrupted mid-file.
 
