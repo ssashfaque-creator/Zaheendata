@@ -78,11 +78,13 @@ def extract_signals(html: str, url: str) -> dict:
         if "linkedin.com/in/" in lowered and looks_like_person(anchor.get_text(" ", strip=True)):
             owner_on_site = owner_on_site or anchor.get_text(" ", strip=True)
     owner_match = re.search(
-        r"(?i:owned by|meet the owner|i['’]m|owner)\s*[:\-]?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})",
+        r"(?i:owned by|meet the owner|i['’]m the owner|owner[:\-])\s+([A-Z][a-z]+)\s+([A-Z][a-z]+)\b",
         text,
     )
-    if owner_match and looks_like_person(owner_match.group(1)):
-        owner_on_site = owner_on_site or owner_match.group(1)
+    if owner_match:
+        candidate = f"{owner_match.group(1)} {owner_match.group(2)}"
+        if looks_like_person(candidate):
+            owner_on_site = owner_on_site or candidate
 
     has_form = bool(soup.find("form"))
     quote_form = has_form and _contains_any(blob, ("quote", "estimate", "request service", "schedule"))

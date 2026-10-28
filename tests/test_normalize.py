@@ -17,6 +17,9 @@ def test_normalize_strips_legal_suffixes() -> None:
 def test_person_vs_company() -> None:
     assert looks_like_person("SKOSKI, MICHAEL JOSEPH")
     assert looks_like_person("Akram A Saleh")
+    assert looks_like_person("Jane Plumber")
+    assert not looks_like_person("At Brooks Custom")
+    assert not looks_like_person("Support Filters Warranty")
     assert not looks_like_person("Intelligent Air Services, Llc")
     assert looks_like_company("Intelligent Air Services, Llc")
 

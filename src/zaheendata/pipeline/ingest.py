@@ -9,9 +9,11 @@ from zaheendata.normalize import (
     DIRECTORY_HOSTS,
     canonicalize_website,
     domain_from_url,
+    email_is_role_account,
     is_own_website,
     looks_like_person,
     name_key,
+    name_similarity,
     normalize_phone,
     phone_key,
 )
@@ -168,6 +170,7 @@ def places_to_leads(
             phone=normalize_phone(data.get("phone")),
             website=website,
             owner_email=data.get("email") or "",
+            email_is_role_account=email_is_role_account(data.get("email") or ""),
             address=data.get("address") or "",
             city=data.get("city") or "",
             state=data.get("state") or "",
@@ -198,11 +201,30 @@ def attach_warehouse_overlays(leads: list[Lead], warehouse: Path | None = None) 
     ).fetchall()
     con.close()
     lic_by_key = {row[6]: row for row in licenses if row[6]}
+    lic_by_phone = {phone_key(row[5]): row for row in licenses if row[5]}
     ppp_by_key = {row[3]: row for row in ppp_rows if row[3]}
 
-    for lead in leads:
+    def _license_for(lead: Lead):
         key = name_key(lead.name)
-        lic = lic_by_key.get(key)
+        hit = lic_by_key.get(key)
+        if hit:
+            return hit
+        phone = phone_key(lead.phone)
+        if phone and phone in lic_by_phone:
+            return lic_by_phone[phone]
+        best = None
+        best_score = 0.0
+        for row in licenses:
+            score = name_similarity(lead.name, row[0])
+            if score > best_score:
+                best_score = score
+                best = row
+        if best is not None and best_score >= 0.86:
+            return best
+        return None
+
+    for lead in leads:
+        lic = _license_for(lead)
         if lic:
             lead.merge_source(lic[7] or "license")
             lead.license_number = lic[3] or lead.license_number
@@ -214,7 +236,7 @@ def attach_warehouse_overlays(leads: list[Lead], warehouse: Path | None = None) 
                 lead.owner_title = lead.owner_title or "Owner / license holder"
             if lic[5] and not lead.phone:
                 lead.phone = normalize_phone(lic[5]) or lead.phone
-        ppp = ppp_by_key.get(key)
+        ppp = ppp_by_key.get(name_key(lead.name))
         if ppp:
             lead.merge_source("sba_ppp")
             if ppp[1] is not None:

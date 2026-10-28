@@ -103,3 +103,21 @@ def test_ingest_filters_directories_and_overlays(tmp_path: Path) -> None:
     assert stats["licenses"] == 1
     assert stats["leads"] == 1
     assert stats["by_subsector"]["plumbing_hvac"] == 3
+
+
+def test_license_fuzzy_name_and_phone_match(tmp_path: Path) -> None:
+    warehouse = tmp_path / "warehouse.duckdb"
+    licenses = tmp_path / "licenses.json"
+    licenses.write_text(
+        '[{"source":"tx_tdlr_ac","business_name":"Chucks Air Conditioning LLC",'
+        '"owner_name":"Chuck Smith","owner_is_person":true,'
+        '"license_number":"TACLA111","license_status":"active",'
+        '"phone":"+15124532288","address":"","city_state_zip":"Buda TX","county":"HAYS"}]',
+        encoding="utf-8",
+    )
+    ingest_license_json(licenses, warehouse, state="TX")
+    lead = empty_lead(name="Chuck's Air Conditioning", phone="+15124532288", website="https://chucksac.com/")
+    attach_warehouse_overlays([lead], warehouse)
+    assert lead.license_number == "TACLA111"
+    assert lead.owner_name == "Chuck Smith"
+    assert "tx_tdlr_ac" in lead.sources

@@ -81,6 +81,23 @@ def looks_like_company(value: str | None) -> bool:
     return text.isupper() and len(text.split()) >= 3
 
 
+PERSON_STOPWORDS = {
+    "at",
+    "the",
+    "our",
+    "your",
+    "this",
+    "meet",
+    "team",
+    "owner",
+    "support",
+    "filters",
+    "warranty",
+    "services",
+    "service",
+}
+
+
 def looks_like_person(value: str | None) -> bool:
     text = fold(value)
     if not text or looks_like_company(text):
@@ -90,6 +107,8 @@ def looks_like_person(value: str | None) -> bool:
         return len(parts) >= 2 and all(part.replace(".", "").replace("-", " ").replace(" ", "").isalpha() for part in parts[:2])
     tokens = [token for token in re.split(r"\s+", text) if token]
     if len(tokens) < 2 or len(tokens) > 4:
+        return False
+    if any(token.lower() in PERSON_STOPWORDS for token in tokens):
         return False
     return all(token.replace(".", "").replace("-", "").isalpha() for token in tokens)
 

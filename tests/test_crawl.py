@@ -36,6 +36,12 @@ def test_extract_hvac_signals() -> None:
     assert "stripe" in signals["tech_stack"]
 
 
+def test_junk_owner_copy_is_ignored() -> None:
+    html = "<p>Meet the owner At Brooks Custom. Support Filters Warranty.</p>"
+    signals = extract_signals(html, "https://brookscustomcomfort.com/")
+    assert signals["owner_on_site"] == ""
+
+
 def test_apply_signals_sets_email_and_owner() -> None:
     lead = empty_lead(name="Cool Air")
     apply_signals(lead, extract_signals(HTML, "https://coolair.example/"))

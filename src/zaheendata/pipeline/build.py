@@ -205,15 +205,17 @@ def build_national(
     if not skip_download:
         download_overture(geo=geo, subsector_key=subsector_key, raw_dir=raw_dir, limit=limit, out=parquet)
         summary["downloaded"] = str(parquet)
-        if licenses:
-            paths = download_licenses_for(geo=geo, subsector_key=subsector_key, raw_dir=raw_dir)
-            summary["license_files"] = [str(path) for path in paths]
-            for path in paths:
-                ingest_license_json(path, warehouse, state=state_from_geo(geo) or "")
-        if ppp:
-            ppp_path = download_ppp_for(subsector_key=subsector_key, geo=geo, raw_dir=raw_dir)
-            summary["ppp_file"] = str(ppp_path)
-            ingest_ppp_file(ppp_path, warehouse)
+
+    if licenses:
+        paths = download_licenses_for(geo=geo, subsector_key=subsector_key, raw_dir=raw_dir)
+        summary["license_files"] = [str(path) for path in paths]
+        summary["licenses_ingested"] = 0
+        for path in paths:
+            summary["licenses_ingested"] += ingest_license_json(path, warehouse, state=state_from_geo(geo) or "")
+    if ppp:
+        ppp_path = download_ppp_for(subsector_key=subsector_key, geo=geo, raw_dir=raw_dir)
+        summary["ppp_file"] = str(ppp_path)
+        ingest_ppp_file(ppp_path, warehouse)
 
     if parquet.exists():
         summary["ingested"] = ingest_overture_parquet(parquet, warehouse)
@@ -241,6 +243,8 @@ def build_national(
     summary["selected"] = sum(1 for lead in ranked if lead.status == "selected")
     summary["with_website"] = sum(1 for lead in ranked if lead.website)
     summary["with_email"] = sum(1 for lead in ranked if lead.owner_email)
+    summary["with_license"] = sum(1 for lead in ranked if lead.license_number)
+    summary["with_person_owner"] = sum(1 for lead in ranked if lead.owner_name)
     summary["with_tools"] = sum(1 for lead in ranked if lead.tech_stack)
     summary["crawled"] = sum(1 for lead in enrichable if lead.website_crawled)
     summary["tools"] = tool_histogram(enrichable)
