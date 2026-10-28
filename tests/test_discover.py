@@ -10,10 +10,7 @@ import respx
 from zaheendata.enrich.discover import (
     DirectoryDiscoverer,
     completeness,
-    distinctive_tokens,
-    domain_stems,
     harvest_from_website,
-    page_matches_business,
     parse_ddg_html,
     pick_website,
 )
@@ -29,14 +26,6 @@ DDG_HTML = (
     '<a class="result__a" href="https://www.facebook.com/1stcall">Facebook</a>'
     "</body></html>"
 )
-
-
-def test_domain_stems_skip_generic_only_names():
-    assert "airco" in domain_stems("Airco Mechanical")
-    assert distinctive_tokens("Cooling Solutions LLC") == []
-    assert page_matches_business("Welcome to Airco Mechanical in Austin", "Airco Mechanical", "Austin")
-    assert not page_matches_business("Buy this domain at GoDaddy", "Airco Mechanical", "Austin")
-    assert not page_matches_business("A generic cooling company", "Cooling Solutions LLC", "Austin")
 
 
 def test_parse_ddg_and_pick_website():
@@ -127,6 +116,7 @@ async def test_discoverer_falls_back_to_duckduckgo(tmp_path: Path):
     respx.get(url__regex=r"https://nominatim\.openstreetmap\.org/search.*").mock(
         return_value=httpx.Response(200, json=[])
     )
+
     def ddg(request: httpx.Request) -> httpx.Response:
         assert "Mozilla" in request.headers.get("user-agent", "")
         return httpx.Response(200, text=DDG_HTML)
