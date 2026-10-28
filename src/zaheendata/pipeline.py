@@ -27,7 +27,7 @@ from .enrich import OwnerEnricher, ReviewAnalyzer, TechStackDetector, WebsiteCra
 from .enrich.discover import DirectoryDiscoverer, completeness, harvest_from_website
 from .enrich.owner import OwnerLookup
 from .filters import PoorFitFilter
-from .geo import AreaMatcher, Geocoder, GeoPlanner, SearchCell
+from .geo import AreaMatcher, Geocoder, GeoPlanner, SearchCell, parse_location_text
 from .http import HostPaused, HttpClient
 from .logging import get_logger
 from .models import (
@@ -35,6 +35,8 @@ from .models import (
     BusinessStatus,
     Campaign,
     CampaignState,
+    GeographySpec,
+    GeoPoint,
     RawRecord,
     SourceSearchSpec,
     utcnow,
@@ -101,8 +103,17 @@ class CampaignRunner:
         subsector = self.registry.get(spec.subsector_key)
         ctx_sources = SourceContext(http=self.http, settings=self.settings)
         sources = build_sources(ctx_sources, subsector, only=spec.sources, extra=self.extra_sources)
-        geocoder = Geocoder(self.http)
-        cells = await GeoPlanner(geocoder).plan(spec.geography)
+        await self._emit(
+            "run.start",
+            campaign=campaign.id,
+            start_stage=start_stage,
+            stop_after=stop_after or "finalize",
+        )
+        if STAGES.index(start_stage) <= STAGES.index("filter"):
+            geocoder = Geocoder(self.http)
+            cells = await GeoPlanner(geocoder).plan(spec.geography)
+        else:
+            cells = self._resume_cells(spec.geography)
         ctx = RunContext(
             campaign=campaign, subsector=subsector, sources=sources, cells=cells, stats=dict(campaign.stats)
         )
@@ -311,6 +322,17 @@ class CampaignRunner:
             region = region or (right.split()[0] if right else None)
         return city, region
 
+    @staticmethod
+    def _resume_cells(spec: GeographySpec) -> list[SearchCell]:
+        """Cheap cells for resume-from-enrich so we do not wait on Nominatim before printing progress."""
+        cells: list[SearchCell] = []
+        for loc in spec.locations:
+            _city, state = parse_location_text(loc)
+            cells.append(SearchCell(GeoPoint(lat=0, lng=0), spec.radius_km, loc, state))
+        if not cells and spec.state:
+            cells.append(SearchCell(GeoPoint(lat=0, lng=0), spec.radius_km, spec.state, spec.state))
+        return cells
+
     async def stage_enrich(self, ctx: RunContext) -> None:
         """Find missing websites/addresses for free, then crawl every site we have. No Google Places."""
         if not ctx.campaign.spec.enrich:
@@ -339,10 +361,31 @@ class CampaignRunner:
         budget = min(self.settings.website_discover_limit or pool, pool)
         pending: list[Business] = []
         pending_lock = asyncio.Lock()
+        await self._emit(
+            "enrich.start",
+            total=len(candidates),
+            discover_budget=budget,
+            note="heartbeat every 20s; first company talks to Census/OSM/DuckDuckGo",
+        )
+        beat_stop = asyncio.Event()
+
+        async def heartbeat() -> None:
+            while True:
+                try:
+                    await asyncio.wait_for(beat_stop.wait(), timeout=20.0)
+                    return
+                except TimeoutError:
+                    await self._emit(
+                        "enrich.working",
+                        done=done,
+                        total=len(candidates),
+                        note="still calling Census, OSM, DuckDuckGo, or crawling",
+                    )
 
         async def enrich_one(b: Business) -> None:
             nonlocal done, discovered
             async with sem:
+                await self._emit("enrich.company", name=b.name)
                 needs = not b.website or not (b.address and b.address.line1) or not b.phone_e164
                 if needs and discovered < budget:
                     discovered += 1
@@ -373,10 +416,22 @@ class CampaignRunner:
                 progress = done
             if flush:
                 await self.db.upsert_businesses(flush)
-            if progress % 10 == 0:
-                await self._emit("enrich.progress", done=progress, total=len(candidates))
+            if progress == 1 or progress % 5 == 0 or progress == len(candidates):
+                await self._emit(
+                    "enrich.progress",
+                    done=progress,
+                    total=len(candidates),
+                    name=b.name,
+                    website=b.website or "-",
+                    phone=b.phone_e164 or "-",
+                )
 
-        await asyncio.gather(*(enrich_one(b) for b in candidates))
+        beat_task = asyncio.create_task(heartbeat())
+        try:
+            await asyncio.gather(*(enrich_one(b) for b in candidates))
+        finally:
+            beat_stop.set()
+            await beat_task
         if pending:
             await self.db.upsert_businesses(pending)
         # Re-check franchise language discovered on the site. Website / review cuts stay deferred

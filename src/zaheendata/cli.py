@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -32,15 +33,29 @@ campaign_app = typer.Typer(help="Create, run and export campaigns.", no_args_is_
 app.add_typer(campaign_app, name="campaign")
 datasets_app = typer.Typer(help="Inspect and download government / public datasets.", no_args_is_help=True)
 app.add_typer(datasets_app, name="datasets")
-console = Console()
+console = Console(force_terminal=True)
 
 
 def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
+def _flush() -> None:
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except (OSError, ValueError, AttributeError):
+        pass
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except OSError:
+        pass
+
+
 @app.callback()
 def _main(verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging.")) -> None:
+    _flush()
     s = get_settings()
     configure_logging("DEBUG" if verbose else s.log_level, s.log_json)
 
@@ -353,6 +368,7 @@ def campaign_test(
 
 def _progress(stage: str, data: dict[str, Any]) -> None:
     console.print(f"[cyan]{stage}[/cyan] " + " ".join(f"{k}={v}" for k, v in data.items()))
+    _flush()
 
 
 @campaign_app.command("run")
@@ -367,21 +383,41 @@ def campaign_run(
     ),
 ) -> None:
     """Run (or resume) a campaign in this process."""
+    through = stop_after or "finalize"
+    console.print(
+        f"starting campaign [bold]{campaign_id}[/bold] at [cyan]{start_stage}[/cyan] "
+        f"through [cyan]{through}[/cyan]. Progress prints while it works; "
+        "200 companies take a while — wait for state=scored before exporting."
+    )
+    _flush()
 
     async def go() -> None:
         db = Database()
-        await db.init()
         http = HttpClient()
         ctx = SourceContext(http=http, settings=get_settings())
         extra: list[Source] = [
             CsvImportSource(ctx, p, source_label=f"import:{p.stem}", kind=SourceKind.IMPORT)
             for p in (import_file or [])
         ]
-        c = await db.get_campaign(campaign_id)
-        if not c:
-            raise typer.BadParameter(f"campaign {campaign_id} not found")
-        runner = CampaignRunner(db, http, extra_sources=extra, progress=_progress)
-        result = await runner.run(c, start_stage, stop_after)
+        try:
+            await db.init()
+            c = await db.get_campaign(campaign_id)
+            if not c:
+                raise typer.BadParameter(f"campaign {campaign_id} not found")
+            console.print(
+                f"loaded [bold]{c.spec.name}[/bold] state={c.state.value} stage={c.stage or '-'}"
+            )
+            _flush()
+            runner = CampaignRunner(db, http, extra_sources=extra, progress=_progress)
+            result = await runner.run(c, start_stage, stop_after)
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "database is locked" in msg or "database locked" in msg:
+                console.print(
+                    "[red]another zaheen process has data/zaheen.db open. "
+                    "In a second tab run: pgrep -fl zaheen[/red]"
+                )
+            raise
         await http.aclose()
         await db.close()
         console.print_json(json.dumps(result.stats, default=str))

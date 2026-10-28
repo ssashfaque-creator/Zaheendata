@@ -54,9 +54,22 @@ async def _run(env, subsector: str = "plumbing_hvac", **spec_kw):
     return db, result, events
 
 
+def test_resume_cells_do_not_need_nominatim():
+    from zaheendata.pipeline import CampaignRunner
+
+    cells = CampaignRunner._resume_cells(GeographySpec(locations=["Austin, TX"], radius_km=25))
+    assert len(cells) == 1
+    assert cells[0].center.lat == 0 and cells[0].center.lng == 0
+    assert cells[0].region == "TX"
+    assert cells[0].label == "Austin, TX"
+
+
 async def test_end_to_end_pipeline(env):
     db, result, events = await _run(env)
     assert result.state == CampaignState.COMPLETED
+    assert events[0] == "run.start"
+    assert "enrich.start" in events
+    assert "enrich.progress" in events
     assert [e for e in events if "." not in e] == [
         "collect",
         "resolve",

@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Float, Index, Integer, String, Text, delete, func, select, update
+from sqlalchemy import JSON, DateTime, Float, Index, Integer, String, Text, delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -97,14 +97,18 @@ class Database:
                 from pathlib import Path
 
                 Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.engine = create_async_engine(
-            self.url, future=True, pool_pre_ping=not self.url.startswith("sqlite")
-        )
+        engine_kw: dict[str, Any] = {"future": True, "pool_pre_ping": not self.url.startswith("sqlite")}
+        if self.url.startswith("sqlite"):
+            engine_kw["connect_args"] = {"timeout": 30.0}
+        self.engine = create_async_engine(self.url, **engine_kw)
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
 
     async def init(self) -> None:
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            if self.url.startswith("sqlite"):
+                await conn.execute(text("PRAGMA journal_mode=WAL"))
+                await conn.execute(text("PRAGMA busy_timeout=30000"))
 
     async def close(self) -> None:
         await self.engine.dispose()
