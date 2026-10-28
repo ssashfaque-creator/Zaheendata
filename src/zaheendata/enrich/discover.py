@@ -28,8 +28,11 @@ from .website import WebsiteFeatures
 log = get_logger(__name__)
 
 DDG_URL = "https://html.duckduckgo.com/html/"
+PHOTON_URL = "https://photon.komoot.io/api/"
+CENSUS_GEOCODER_URL = "https://geocoding.geo.census.gov/geocoder/locations/address"
 WEBSITE_MATCH_THRESHOLD = 55
 NOMINATIM_MATCH_THRESHOLD = 80
+PHOTON_MATCH_THRESHOLD = 85
 # DDG's HTML endpoint returns an empty homepage (HTTP 202) for bot UAs.
 DDG_HEADERS = {
     "User-Agent": (
@@ -144,6 +147,105 @@ def pick_website(business_name: str, urls: list[str]) -> str | None:
     return None
 
 
+_STATE_NAMES = {
+    "AL": "ALABAMA",
+    "AK": "ALASKA",
+    "AZ": "ARIZONA",
+    "AR": "ARKANSAS",
+    "CA": "CALIFORNIA",
+    "CO": "COLORADO",
+    "CT": "CONNECTICUT",
+    "DC": "DISTRICT OF COLUMBIA",
+    "DE": "DELAWARE",
+    "FL": "FLORIDA",
+    "GA": "GEORGIA",
+    "HI": "HAWAII",
+    "IA": "IOWA",
+    "ID": "IDAHO",
+    "IL": "ILLINOIS",
+    "IN": "INDIANA",
+    "KS": "KANSAS",
+    "KY": "KENTUCKY",
+    "LA": "LOUISIANA",
+    "MA": "MASSACHUSETTS",
+    "MD": "MARYLAND",
+    "ME": "MAINE",
+    "MI": "MICHIGAN",
+    "MN": "MINNESOTA",
+    "MO": "MISSOURI",
+    "MS": "MISSISSIPPI",
+    "MT": "MONTANA",
+    "NC": "NORTH CAROLINA",
+    "ND": "NORTH DAKOTA",
+    "NE": "NEBRASKA",
+    "NH": "NEW HAMPSHIRE",
+    "NJ": "NEW JERSEY",
+    "NM": "NEW MEXICO",
+    "NV": "NEVADA",
+    "NY": "NEW YORK",
+    "OH": "OHIO",
+    "OK": "OKLAHOMA",
+    "OR": "OREGON",
+    "PA": "PENNSYLVANIA",
+    "RI": "RHODE ISLAND",
+    "SC": "SOUTH CAROLINA",
+    "SD": "SOUTH DAKOTA",
+    "TN": "TENNESSEE",
+    "TX": "TEXAS",
+    "UT": "UTAH",
+    "VA": "VIRGINIA",
+    "VT": "VERMONT",
+    "WA": "WASHINGTON",
+    "WI": "WISCONSIN",
+    "WV": "WEST VIRGINIA",
+    "WY": "WYOMING",
+}
+
+
+def _state_matches(want: str, got: str) -> bool:
+    w, g = want.strip().upper(), got.strip().upper()
+    if w == g:
+        return True
+    return _STATE_NAMES.get(w) == g or _STATE_NAMES.get(g) == w
+
+
+def census_point(payload: dict[str, Any]) -> GeoPoint | None:
+    matches = ((payload.get("result") or {}).get("addressMatches")) or []
+    if not matches:
+        return None
+    coords = matches[0].get("coordinates") or {}
+    if coords.get("y") is None or coords.get("x") is None:
+        return None
+    return GeoPoint(lat=float(coords["y"]), lng=float(coords["x"]))
+
+
+def photon_pick(
+    business_name: str, city: str | None, region: str | None, features: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Choose an OSM/Photon hit only when the name (and city, if we have one) actually match."""
+    target = normalize_name(business_name)
+    if not target or not features:
+        return None
+    want_city = normalize_name(city) if city else ""
+    want_region = (region or "").strip().upper()
+    best: tuple[float, dict[str, Any]] | None = None
+    for feat in features:
+        props = feat.get("properties") or {}
+        name = str(props.get("name") or "")
+        score = float(fuzz.token_set_ratio(target, normalize_name(name)))
+        if score < PHOTON_MATCH_THRESHOLD:
+            continue
+        got_city = normalize_name(str(props.get("city") or props.get("locality") or ""))
+        if want_city and got_city and float(fuzz.token_set_ratio(want_city, got_city)) < 80:
+            continue
+        state = str(props.get("state") or "")
+        if want_region and state and not _state_matches(want_region, state):
+            continue
+        if best is None or score > best[0]:
+            best = (score, feat)
+    return best[1] if best else None
+
+
 def harvest_from_website(b: Business) -> None:
     """Copy phone, email, owner and street address discovered on the crawled site onto the record."""
     wf: WebsiteFeatures = b.website_features
@@ -188,7 +290,9 @@ class DirectoryDiscoverer:
         self.http = http
         self.settings = settings or get_settings()
         self.fallback_where = ""
-        self.http.set_host_rate("html.duckduckgo.com", 0.4, concurrency=1)
+        self.http.set_host_rate("html.duckduckgo.com", 0.5, concurrency=1)
+        self.http.set_host_rate("photon.komoot.io", 1.0, concurrency=1)
+        self.http.set_host_rate("geocoding.geo.census.gov", 1.0, concurrency=1)
         host = urlparse(self.settings.nominatim_url).netloc
         if host:
             self.http.set_host_rate(host, 0.8, concurrency=1)
@@ -204,10 +308,21 @@ class DirectoryDiscoverer:
         """Best-effort fill. Returns a map of which fields came from which source."""
         found: dict[str, str] = {}
         addr = b.address
+        if addr and addr.line1 and b.location is None:
+            try:
+                if await self._census(b):
+                    found["geo"] = "census"
+            except Exception as exc:  # noqa: BLE001
+                log.debug("discover.census_failed", name=b.name, error=str(exc)[:200])
+        try:
+            if await self._photon(b):
+                found.setdefault("poi", "photon")
+        except Exception as exc:  # noqa: BLE001
+            log.debug("discover.photon_failed", name=b.name, error=str(exc)[:200])
         if addr and addr.line1:
             try:
                 if await self._nominatim(b):
-                    found["geo"] = "nominatim"
+                    found.setdefault("geo", "nominatim")
             except Exception as exc:  # noqa: BLE001
                 log.debug("discover.nominatim_failed", name=b.name, error=str(exc)[:200])
         if not b.website:
@@ -224,6 +339,89 @@ class DirectoryDiscoverer:
         if found:
             log.info("discover.filled", name=b.name, **found)
         return found
+
+    async def _census(self, b: Business) -> bool:
+        addr = b.address
+        if not addr or not addr.line1:
+            return False
+        data = await self.http.get_json(
+            CENSUS_GEOCODER_URL,
+            params={
+                "street": addr.line1,
+                "city": addr.city or "",
+                "state": addr.region or "",
+                "zip": addr.postal_code or "",
+                "benchmark": "Public_AR_Current",
+                "format": "json",
+            },
+        )
+        point = census_point(data if isinstance(data, dict) else {})
+        if point is None:
+            return False
+        b.location = point
+        b.attributes["geo_source"] = "census"
+        return True
+
+    async def _photon(self, b: Business) -> bool:
+        where = self._where(b)
+        query = f"{b.name} {where}".strip()
+        if not query:
+            return False
+        data = await self.http.get_json(PHOTON_URL, params={"q": query, "limit": 5, "lang": "en"})
+        features = data.get("features") if isinstance(data, dict) else None
+        city, region = (b.address.city if b.address else None), (b.address.region if b.address else None)
+        if not city and "," in where:
+            city, region = (p.strip() for p in where.split(",", 1))
+            region = region.split()[0] if region else region
+        feat = photon_pick(b.name, city, region, features or [])
+        if feat is None:
+            return False
+        props = feat.get("properties") or {}
+        changed = False
+        coords = (feat.get("geometry") or {}).get("coordinates") or []
+        if b.location is None and len(coords) >= 2:
+            b.location = GeoPoint(lat=float(coords[1]), lng=float(coords[0]))
+            changed = True
+        cur = b.address or Address()
+        house, street = props.get("housenumber"), props.get("street")
+        line1 = " ".join(str(p) for p in (house, street) if p) or None
+        if line1 and not cur.line1:
+            cur.line1 = line1
+            changed = True
+        if props.get("city") and not cur.city:
+            cur.city = str(props["city"])
+            changed = True
+        if props.get("postcode") and not cur.postal_code:
+            cur.postal_code = str(props["postcode"])
+            changed = True
+        if changed:
+            b.address = cur
+            b.attributes["poi_source"] = "photon"
+        osm_type, osm_id = props.get("osm_type"), props.get("osm_id")
+        if osm_type and osm_id and (not b.website or not b.phone_e164):
+            prefix = {"N": "N", "W": "W", "R": "R"}.get(str(osm_type)[0].upper(), "N")
+            try:
+                rows = await self.http.get_json(
+                    f"{self.settings.nominatim_url}/lookup",
+                    params={"osm_ids": f"{prefix}{osm_id}", "format": "json", "extratags": 1},
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.debug("discover.photon_lookup_failed", error=str(exc)[:200])
+                rows = []
+            extra = (rows[0].get("extratags") or {}) if isinstance(rows, list) and rows else {}
+            if not b.website:
+                url = normalize_url(extra.get("website") or extra.get("contact:website"))
+                if url and not is_social_or_directory_url(url):
+                    b.website = url
+                    b.domain = extract_domain(url)
+                    b.attributes["website_source"] = "osm"
+                    changed = True
+            if not b.phone_e164:
+                e164 = normalize_phone(extra.get("phone") or extra.get("contact:phone"))
+                if e164:
+                    b.phone_e164 = e164
+                    changed = True
+        return changed
 
     async def _nominatim(self, b: Business) -> bool:
         query = " ".join(p for p in (b.name, self._where(b)) if p).strip()

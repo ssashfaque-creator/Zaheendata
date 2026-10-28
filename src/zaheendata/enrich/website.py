@@ -502,10 +502,22 @@ class WebsiteCrawler:
                 continue
             visited.add(key)
             try:
-                resp = await self.http.get(url, check_robots=True, max_bytes=self.settings.website_max_bytes)
+                resp = await self.http.get(
+                    url,
+                    check_robots=len(pages) > 0,
+                    max_bytes=self.settings.website_max_bytes,
+                    headers=None
+                    if len(pages)
+                    else {
+                        "User-Agent": (
+                            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                        )
+                    },
+                )
             except RobotsDisallowed:
                 log.info("website.robots_disallowed", url=url)
-                break
+                continue
             except Exception as exc:  # noqa: BLE001
                 log.debug("website.fetch_failed", url=url, error=str(exc))
                 if not pages:

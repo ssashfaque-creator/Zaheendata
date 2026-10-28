@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from zaheendata import api as api_mod
-from zaheendata.export import COLUMNS, flatten, to_csv, to_xlsx
+from zaheendata.export import COLUMNS, LEAD_COLUMNS, flatten, to_csv, to_xlsx
 from zaheendata.http import HttpClient, ResponseCache
 from zaheendata.models import BusinessStatus, CampaignSpec, CampaignState, GeographySpec
 from zaheendata.pipeline import CampaignRunner
@@ -126,8 +126,11 @@ async def test_export_formats(env):
     assert rows[1]["suppressed"] is True and "domain suppressed" in rows[1]["suppression_reasons"]
     csv_text = to_csv(items, sup)
     assert csv_text.splitlines()[0].split(",") == COLUMNS
+    assert COLUMNS[:3] == ["name", "phone", "website"]
+    assert LEAD_COLUMNS[0] == "name"
     assert len(csv_text.splitlines()) == 4
     assert to_xlsx(items, sup)[:2] == b"PK"
+    assert flatten(items[0])["website_crawled"] is True
 
 
 async def test_vendor_only_campaign_skips_review_rule(env, tmp_path: Path):
@@ -389,7 +392,7 @@ async def test_api_flow(fixtures_dir: Path):
         queued = await client.post(f"/campaigns/{cid}/queue")
         assert queued.json()["state"] == "queued"
         export = await client.get(f"/campaigns/{cid}/export")
-        assert export.status_code == 200 and export.text.startswith("rank,")
+        assert export.status_code == 200 and export.text.startswith("name,")
         sup = await client.post("/suppressions", json={"kind": "email", "values": ["a@b.com", "a@b.com"]})
         assert sup.json() == {"added": 1}
 

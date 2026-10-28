@@ -9,9 +9,11 @@ import respx
 
 from zaheendata.enrich.discover import (
     DirectoryDiscoverer,
+    census_point,
     completeness,
     harvest_from_website,
     parse_ddg_html,
+    photon_pick,
     pick_website,
 )
 from zaheendata.http import HttpClient, ResponseCache
@@ -26,6 +28,30 @@ DDG_HTML = (
     '<a class="result__a" href="https://www.facebook.com/1stcall">Facebook</a>'
     "</body></html>"
 )
+
+
+def test_census_point_reads_coordinates():
+    point = census_point({"result": {"addressMatches": [{"coordinates": {"x": -97.75, "y": 30.25}}]}})
+    assert point is not None and abs(point.lat - 30.25) < 0.001 and abs(point.lng + 97.75) < 0.001
+    assert census_point({"result": {"addressMatches": []}}) is None
+
+
+def test_photon_pick_requires_name_and_city_match():
+    airco = {
+        "properties": {"name": "Airco Mechanical", "city": "Austin", "state": "Texas"},
+        "geometry": {"coordinates": [-97.7, 30.3]},
+    }
+    other_city = {
+        "properties": {"name": "Airco Mechanical", "city": "Dallas", "state": "Texas"},
+        "geometry": {"coordinates": [-96.8, 32.8]},
+    }
+    airport = {
+        "properties": {"name": "Austin-Bergstrom International Airport", "city": "Austin", "state": "Texas"},
+        "geometry": {"coordinates": [-97.6, 30.2]},
+    }
+    assert photon_pick("Airco Mechanical", "Austin", "TX", [airport, airco])["properties"]["city"] == "Austin"
+    assert photon_pick("Airco Mechanical", "Austin", "TX", [other_city]) is None
+    assert photon_pick("Airco Mechanical", "Austin", "TX", [airport]) is None
 
 
 def test_parse_ddg_and_pick_website():
