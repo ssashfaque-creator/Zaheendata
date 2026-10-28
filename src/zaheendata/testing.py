@@ -46,6 +46,13 @@ class FixtureTransport(httpx.AsyncBaseTransport):
                 200, content=b'{"elements":[]}', headers={"content-type": "application/json"}
             )
         if "duckduckgo.com" in host:
+            if host.startswith("api."):
+                return httpx.Response(
+                    200, content=b'{"AbstractURL":"","RelatedTopics":[]}',
+                    headers={"content-type": "application/json"},
+                )
+            return httpx.Response(200, content=b"<html></html>", headers={"content-type": "text/html"})
+        if host in {"www.bing.com", "bing.com"}:
             return httpx.Response(200, content=b"<html></html>", headers={"content-type": "text/html"})
         if "maps.googleapis.com" in host and path.endswith("/geocode/json"):
             body = json.dumps(

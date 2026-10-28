@@ -9,6 +9,7 @@ import respx
 
 from zaheendata.http import (
     HostPaused,
+    HostUnavailable,
     HttpClient,
     ResponseCache,
     RetryableHTTPError,
@@ -189,6 +190,23 @@ async def test_http_pauses_host_after_repeated_429(tmp_path: Path, monkeypatch: 
     finally:
         await http.aclose()
         get_settings.cache_clear()
+
+
+@respx.mock
+async def test_connect_timeout_does_not_pause_host(tmp_path: Path):
+    settings = get_settings()
+    respx.get("https://html.duckduckgo.com/html/").mock(side_effect=httpx.ConnectTimeout("timed out"))
+    http = HttpClient(settings, cache=ResponseCache(tmp_path / "c.sqlite", 100))
+    try:
+        with pytest.raises(httpx.ConnectTimeout):
+            await http.get("https://html.duckduckgo.com/html/", retries=1, timeout_seconds=1)
+        assert not http.is_paused("html.duckduckgo.com")
+        with pytest.raises(HostUnavailable):
+            await http.get("https://html.duckduckgo.com/html/", retries=1, timeout_seconds=1)
+        assert not http.is_paused("html.duckduckgo.com")
+        assert http.host_available("html.duckduckgo.com") is False
+    finally:
+        await http.aclose()
 
 
 def test_csv_auto_mapping_registry_extract_style():

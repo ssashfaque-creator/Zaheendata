@@ -422,7 +422,7 @@ class CampaignRunner:
                 or not (b.address and b.address.line1)
                 or b.location is None
             ]
-            photon_n = await discoverer.fill_photon_many(photon_targets)
+            photon_n = await discoverer.fill_osm_many(photon_targets)
             await self._emit("enrich.phase", phase="photon", filled=photon_n)
 
             phase[0] = "osm_contacts"

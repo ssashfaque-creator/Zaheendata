@@ -105,6 +105,14 @@ class Settings(BaseSettings):
         ]
     )
     nominatim_url: str = "https://nominatim.openstreetmap.org"
+    photon_urls: list[str] = Field(
+        default_factory=lambda: [
+            "https://photon.komoot.io/api/",
+            "https://photon.koalasec.org/api/",
+            "https://photon.marsmathis.com/api/",
+        ],
+        description="Photon geocoder endpoints; later URLs are used when komoot returns 503.",
+    )
 
     # --- pipeline defaults (from the method in the brief) -------------------
     long_list_target: int = Field(

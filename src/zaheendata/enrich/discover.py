@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from bs4 import BeautifulSoup
 from rapidfuzz import fuzz
 
-from ..http import HostPaused, HttpClient
+from ..http import HostPaused, HostUnavailable, HttpClient
 from ..logging import get_logger
 from ..models import Address, Business, GeoPoint, OwnerContact
 from ..normalize import (
@@ -34,6 +34,8 @@ log = get_logger(__name__)
 
 DDG_URL = "https://html.duckduckgo.com/html/"
 DDG_LITE_URL = "https://lite.duckduckgo.com/lite/"
+DDG_API_URL = "https://api.duckduckgo.com/"
+BING_URL = "https://www.bing.com/search"
 PHOTON_URL = "https://photon.komoot.io/api/"
 CENSUS_GEOCODER_URL = "https://geocoding.geo.census.gov/geocoder/locations/address"
 CENSUS_BATCH_URL = "https://geocoding.geo.census.gov/geocoder/locations/addressbatch"
@@ -130,6 +132,55 @@ def parse_ddg_html(html: str) -> list[str]:
                     continue
                 seen.add(url)
                 urls.append(url)
+    return urls
+
+
+def parse_ddg_api(payload: dict[str, Any]) -> list[str]:
+    """URLs from DuckDuckGo's JSON API (different host than the HTML endpoints)."""
+    urls: list[str] = []
+    for key in ("AbstractURL", "Redirect"):
+        raw = payload.get(key)
+        if isinstance(raw, str) and raw.startswith("http"):
+            urls.append(raw)
+    for item in payload.get("Results") or []:
+        if isinstance(item, dict) and isinstance(item.get("FirstURL"), str):
+            urls.append(item["FirstURL"])
+
+    def walk(topics: Any) -> None:
+        if not isinstance(topics, list):
+            return
+        for topic in topics:
+            if not isinstance(topic, dict):
+                continue
+            first = topic.get("FirstURL")
+            if isinstance(first, str):
+                urls.append(first)
+            walk(topic.get("Topics"))
+
+    walk(payload.get("RelatedTopics"))
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in urls:
+        url = normalize_url(raw)
+        if url and url not in seen:
+            seen.add(url)
+            out.append(url)
+    return out
+
+
+def parse_bing_html(html: str) -> list[str]:
+    soup = BeautifulSoup(html or "", "html.parser")
+    urls: list[str] = []
+    seen: set[str] = set()
+    for a in soup.find_all("a"):
+        url = normalize_url(_href_str(a.get("href")))
+        if not url or url in seen:
+            continue
+        host = extract_domain(url) or ""
+        if host in {"bing.com", "microsoft.com", "msn.com"} or host.endswith(".bing.com"):
+            continue
+        seen.add(url)
+        urls.append(url)
     return urls
 
 
@@ -333,7 +384,12 @@ class DirectoryDiscoverer:
         # html vs lite so website search is ~2/s without doubling up on one endpoint.
         self.http.set_host_rate("html.duckduckgo.com", 1.0, concurrency=1)
         self.http.set_host_rate("lite.duckduckgo.com", 1.0, concurrency=1)
-        self.http.set_host_rate("photon.komoot.io", 3.0, concurrency=3)
+        self.http.set_host_rate("api.duckduckgo.com", 1.0, concurrency=1)
+        self.http.set_host_rate("www.bing.com", 1.0, concurrency=1)
+        for photon in self.settings.photon_urls:
+            host = urlparse(photon).netloc
+            if host:
+                self.http.set_host_rate(host, 1.0, concurrency=1)
         self.http.set_host_rate("geocoding.geo.census.gov", 4.0, concurrency=4)
         host = urlparse(self.settings.nominatim_url).netloc
         if host:
@@ -387,7 +443,7 @@ class DirectoryDiscoverer:
                     found.setdefault("geo", "nominatim")
                     if b.website:
                         found.setdefault("website", "nominatim")
-            except HostPaused:
+            except (HostPaused, HostUnavailable):
                 pass
             except Exception as exc:  # noqa: BLE001
                 log.debug("discover.nominatim_failed", name=b.name, error=str(exc)[:200])
@@ -457,6 +513,32 @@ class DirectoryDiscoverer:
 
         await asyncio.gather(*(one(b) for b in businesses), return_exceptions=True)
         return filled
+
+    async def fill_osm_many(self, businesses: list[Business]) -> int:
+        """Photon (with mirrors), then Nominatim for rows Photon could not fill."""
+        n = await self.fill_photon_many(businesses)
+        need = [
+            b
+            for b in businesses
+            if not b.attributes.get("osm_id")
+            and (not b.website or not b.phone_e164 or not (b.address and b.address.line1))
+        ]
+        if not need:
+            return n
+        extra = 0
+
+        async def one(b: Business) -> None:
+            nonlocal extra
+            try:
+                if await self._nominatim(b):
+                    extra += 1
+            except (HostPaused, HostUnavailable):
+                return
+            except Exception as exc:  # noqa: BLE001
+                log.debug("discover.nominatim_failed", name=b.name, error=str(exc)[:200])
+
+        await asyncio.gather(*(one(b) for b in need), return_exceptions=True)
+        return n + extra
 
     async def fill_website(self, b: Business) -> bool:
         if b.website:
@@ -575,9 +657,26 @@ class DirectoryDiscoverer:
         query = f"{b.name} {where}".strip()
         if not query:
             return False
-        data = await self.http.get_json(
-            PHOTON_URL, params={"q": query, "limit": 5, "lang": "en"}, **self._fast()
-        )
+        data: Any = None
+        bases = list(self.settings.photon_urls) or [PHOTON_URL]
+        for base in bases:
+            host = urlparse(base).netloc
+            if host:
+                self.http.set_host_rate(host, 1.0, concurrency=1)
+            if host and not self.http.host_available(host):
+                continue
+            try:
+                data = await self.http.get_json(
+                    base, params={"q": query, "limit": 5, "lang": "en"}, **self._fast()
+                )
+                break
+            except (HostPaused, HostUnavailable):
+                continue
+            except Exception as exc:  # noqa: BLE001
+                log.debug("discover.photon_endpoint_failed", url=base, error=str(exc)[:200])
+                continue
+        if not isinstance(data, dict):
+            return False
         features = data.get("features") if isinstance(data, dict) else None
         city, region = (b.address.city if b.address else None), (b.address.region if b.address else None)
         if not city and "," in where:
@@ -685,20 +784,46 @@ class DirectoryDiscoverer:
     async def _duckduckgo(self, b: Business) -> str | None:
         where = self._where(b)
         query = f"{b.name} {where} official website".strip()
-        primary = DDG_URL if hash(b.name) % 2 == 0 else DDG_LITE_URL
-        other = DDG_LITE_URL if primary == DDG_URL else DDG_URL
-        for url in (primary, other):
+        engines: list[tuple[str, str, str]] = [
+            ("duckduckgo", DDG_URL, "html"),
+            ("duckduckgo", DDG_LITE_URL, "html"),
+            ("duckduckgo", DDG_API_URL, "api"),
+            ("bing", BING_URL, "bing"),
+        ]
+        for source, url, kind in engines:
             host = urlparse(url).netloc
-            if self.http.is_paused(host):
+            if host:
+                self.http.set_host_rate(host, 1.0, concurrency=1)
+            if host and not self.http.host_available(host):
                 continue
             try:
-                resp = await self.http.get(url, params={"q": query}, headers=DDG_HEADERS, **self._fast())
-            except HostPaused:
+                if kind == "api":
+                    resp = await self.http.get(
+                        url,
+                        params={"q": query, "format": "json", "no_html": "1", "skip_disambig": "1"},
+                        headers=DDG_HEADERS,
+                        **self._fast(),
+                    )
+                    payload = resp.json() if resp.status_code < 400 else {}
+                    urls = parse_ddg_api(payload if isinstance(payload, dict) else {})
+                elif kind == "bing":
+                    resp = await self.http.get(
+                        url, params={"q": query}, headers=DDG_HEADERS, **self._fast()
+                    )
+                    urls = parse_bing_html(resp.text if resp.status_code < 400 else "")
+                else:
+                    resp = await self.http.get(
+                        url, params={"q": query}, headers=DDG_HEADERS, **self._fast()
+                    )
+                    if resp.status_code >= 400 or not resp.text:
+                        continue
+                    urls = parse_ddg_html(resp.text)
+            except (HostPaused, HostUnavailable, Exception) as exc:  # noqa: BLE001
+                log.debug("discover.search_failed", engine=source, url=url, error=str(exc)[:200])
                 continue
-            if resp.status_code >= 400 or not resp.text:
-                continue
-            picked = pick_website(b.name, parse_ddg_html(resp.text))
+            picked = pick_website(b.name, urls)
             if picked:
+                b.attributes["website_search"] = source
                 return picked
         return None
 

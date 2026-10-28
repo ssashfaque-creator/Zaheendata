@@ -12,7 +12,9 @@ from zaheendata.enrich.discover import (
     census_point,
     completeness,
     harvest_from_website,
+    parse_bing_html,
     parse_census_batch,
+    parse_ddg_api,
     parse_ddg_html,
     photon_pick,
     pick_website,
@@ -64,6 +66,21 @@ def test_photon_pick_requires_name_and_city_match():
     assert photon_pick("Airco Mechanical", "Austin", "TX", [airport, airco])["properties"]["city"] == "Austin"
     assert photon_pick("Airco Mechanical", "Austin", "TX", [other_city]) is None
     assert photon_pick("Airco Mechanical", "Austin", "TX", [airport]) is None
+
+
+def test_parse_ddg_api_and_bing_html():
+    api_urls = parse_ddg_api(
+        {
+            "AbstractURL": "https://www.1stcallplumbing.com/",
+            "RelatedTopics": [{"FirstURL": "https://www.yelp.com/biz/x"}],
+        }
+    )
+    assert any("1stcallplumbing.com" in u for u in api_urls)
+    bing = parse_bing_html(
+        '<ol id="b_results"><li class="b_algo"><h2>'
+        '<a href="https://www.1stcallplumbing.com/">1st Call</a></h2></li></ol>'
+    )
+    assert any("1stcallplumbing.com" in u for u in bing)
 
 
 def test_parse_ddg_and_pick_website():
@@ -280,3 +297,62 @@ async def test_apply_osm_contacts_from_overpass(tmp_path: Path):
     assert n == 1
     assert b.website and "airco.com" in b.website
     assert b.phone_e164 == "+15125550199"
+
+
+@respx.mock
+async def test_photon_fails_over_to_a_mirror(tmp_path: Path):
+    settings = get_settings()
+    respx.get(url__regex=r"https://photon\.komoot\.io/api/.*").mock(return_value=httpx.Response(503))
+    respx.get(url__regex=r"https://photon\.koalasec\.org/api/.*").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "features": [
+                    {
+                        "properties": {
+                            "name": "Airco Mechanical",
+                            "city": "Austin",
+                            "state": "Texas",
+                            "osm_type": "N",
+                            "osm_id": 7,
+                        },
+                        "geometry": {"coordinates": [-97.7, 30.3]},
+                    }
+                ]
+            },
+        )
+    )
+    http = HttpClient(settings, cache=ResponseCache(tmp_path / "c.sqlite", 60))
+    disc = DirectoryDiscoverer(http, settings)
+    disc.fallback_where = "Austin, TX"
+    b = Business(name="Airco Mechanical", address=Address(city="Austin", region="TX"))
+    assert await disc.fill_photon_many([b]) == 1
+    await http.aclose()
+    assert b.attributes.get("osm_id") == 7
+    assert not http.is_paused("photon.komoot.io")
+
+
+@respx.mock
+async def test_website_search_falls_back_to_bing_when_ddg_times_out(tmp_path: Path):
+    settings = get_settings()
+    respx.get(url__regex=r"https://(html|lite|api)\.duckduckgo\.com/.*").mock(
+        side_effect=httpx.ConnectTimeout("timed out")
+    )
+    respx.get(url__regex=r"https://www\.bing\.com/search.*").mock(
+        return_value=httpx.Response(
+            200,
+            text=(
+                '<ol id="b_results"><li class="b_algo"><h2>'
+                '<a href="https://www.1stcallplumbing.com/">1st Call</a></h2></li></ol>'
+            ),
+        )
+    )
+    http = HttpClient(settings, cache=ResponseCache(tmp_path / "c.sqlite", 60))
+    disc = DirectoryDiscoverer(http, settings)
+    disc.fallback_where = "Austin, TX"
+    b = Business(name="1ST CALL PLUMBING HEATING & AIR LTD")
+    assert await disc.fill_website(b) is True
+    await http.aclose()
+    assert b.website and "1stcallplumbing.com" in b.website
+    assert not http.is_paused("html.duckduckgo.com")
+    assert not http.is_paused("lite.duckduckgo.com")

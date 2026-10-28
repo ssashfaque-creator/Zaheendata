@@ -59,6 +59,22 @@ class HostPaused(Exception):
         self.reason = reason
 
 
+class HostUnavailable(Exception):
+    """This host timed out or returned 503; skip it briefly and try another endpoint."""
+
+    def __init__(self, host: str, retry_in: float):
+        super().__init__(f"{host} unavailable for {retry_in:.0f}s")
+        self.host = host
+        self.retry_in = retry_in
+
+
+def as_timeout(seconds: float | None) -> httpx.Timeout | None:
+    """Keep reads at ``seconds`` but fail a hung TCP handshake in 3s (IPv6 blackhole)."""
+    if seconds is None:
+        return None
+    return httpx.Timeout(connect=min(3.0, seconds), read=seconds, write=seconds, pool=min(5.0, seconds))
+
+
 class RobotsDisallowed(Exception):
     pass
 
@@ -217,9 +233,12 @@ class HttpClient:
     ):
         self.settings = settings or get_settings()
         s = self.settings
+        if transport is None:
+            # Prefer IPv4 so DuckDuckGo/Photon do not hang on a broken IPv6 path.
+            transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0")
         self._client = httpx.AsyncClient(
             headers={"User-Agent": s.user_agent, "Accept-Language": "en-US,en;q=0.9"},
-            timeout=s.http_timeout_seconds,
+            timeout=as_timeout(s.http_timeout_seconds),
             follow_redirects=True,
             limits=httpx.Limits(max_connections=s.global_concurrency * 2, max_keepalive_connections=20),
             transport=transport,
@@ -233,7 +252,7 @@ class HttpClient:
         self._host_rates: dict[str, float] = {}
         self._host_cooldown: dict[str, float] = {}
         self._429_streak: dict[str, int] = {}
-        self._fail_streak: dict[str, int] = {}
+        self._host_skip_until: dict[str, float] = {}
         self._host_disabled: dict[str, str] = {}
 
     def set_host_rate(self, host: str, requests_per_second: float, concurrency: int | None = None) -> None:
@@ -256,6 +275,11 @@ class HttpClient:
 
     def is_paused(self, host: str) -> bool:
         return host in self._host_disabled
+
+    def host_available(self, host: str) -> bool:
+        if self.is_paused(host):
+            return False
+        return time.monotonic() >= self._host_skip_until.get(host, 0)
 
     def pause_reason(self, host: str) -> str | None:
         return self._host_disabled.get(host)
@@ -300,16 +324,22 @@ class HttpClient:
 
         if self.is_paused(host):
             raise HostPaused(host, self._host_disabled[host])
+        skip_until = self._host_skip_until.get(host, 0)
+        if skip_until > time.monotonic():
+            raise HostUnavailable(host, skip_until - time.monotonic())
 
         async def _once() -> httpx.Response:
             if self.is_paused(host):
                 raise HostPaused(host, self._host_disabled[host])
+            skip = self._host_skip_until.get(host, 0)
+            if skip > time.monotonic():
+                raise HostUnavailable(host, skip - time.monotonic())
             cooldown = self._host_cooldown.get(host, 0) - time.monotonic()
             if cooldown > 0:
                 await asyncio.sleep(min(cooldown, 120))
             async with self._global, self._sem(host):
                 await self._bucket(host).acquire()
-                req_timeout = timeout_seconds
+                req_timeout = as_timeout(timeout_seconds)
                 if max_bytes:
                     stream_kw: dict[str, Any] = {
                         "params": params,
@@ -347,7 +377,7 @@ class HttpClient:
                     resp = await self._client.request(method, url, **req_kw)
             if 200 <= resp.status_code < 400:
                 self._429_streak[host] = 0
-                self._fail_streak[host] = 0
+                self._host_skip_until.pop(host, None)
             if resp.status_code in (408, 425, 429, 500, 502, 503, 504):
                 wait = parse_retry_after(resp.headers.get("retry-after"))
                 if resp.status_code == 429:
@@ -356,6 +386,9 @@ class HttpClient:
                     self._429_streak[host] = self._429_streak.get(host, 0) + 1
                     if self._429_streak[host] >= 6:
                         self._disable_host(host, "HTTP 429 rate limit / quota exhausted")
+                elif resp.status_code in (502, 503, 504, 408):
+                    # Do not sleep the whole pool; skip this host and let the caller fail over.
+                    self._host_skip_until[host] = time.monotonic() + 20.0
                 raise RetryableHTTPError(resp.status_code, wait)
             return resp
 
@@ -371,6 +404,8 @@ class HttpClient:
                         resp = await _once()
                     except HostPaused:
                         raise
+                    except HostUnavailable:
+                        raise
                     except RetryableHTTPError as exc:
                         if exc.status == 429 and self.is_paused(host):
                             raise HostPaused(host, self._host_disabled[host]) from exc
@@ -380,9 +415,12 @@ class HttpClient:
         except RetryError as exc:
             last = exc.last_attempt.exception()
             log.warning("http.giveup", url=redact_url(url), error=str(last) or type(last).__name__)
-            self._fail_streak[host] = self._fail_streak.get(host, 0) + 1
-            if self._fail_streak[host] >= 3:
-                self._disable_host(host, "repeated timeouts or server errors")
+            # Timeouts and 503s must not pause the host for the rest of the campaign — that
+            # dropped the remaining companies. Skip this host briefly and keep going.
+            if isinstance(last, httpx.TransportError) or (
+                isinstance(last, RetryableHTTPError) and last.status in {408, 502, 503, 504}
+            ):
+                self._host_skip_until[host] = time.monotonic() + 20.0
             raise last if last else exc
 
         if meter:
