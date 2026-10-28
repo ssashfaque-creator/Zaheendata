@@ -121,6 +121,12 @@ def plan(
         f"total 5-19 employee establishments in scope: [bold]{result['total_estab_5_19']}[/bold]; "
         f"recommended scope: [bold]{result['recommendation']}[/bold] - {result['note']}"
     )
+    if not result["top"]:
+        console.print(
+            "[yellow]Census returned no rows.[/yellow] That is almost always a query problem, not "
+            "zero businesses. Try `--level state`, or run the campaign anyway — this command is "
+            "only a size estimate."
+        )
 
 
 @datasets_app.command("list")

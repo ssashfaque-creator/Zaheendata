@@ -297,7 +297,7 @@ class HttpClient:
 
         if meter:
             self.ledger.record(meter)
-        if cacheable and 200 <= resp.status_code < 300:
+        if cacheable and resp.status_code == 200:
             await self.cache.put(
                 key if not cache_headers else key + ":auth",
                 resp.status_code,

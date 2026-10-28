@@ -119,11 +119,12 @@ made their own legal assessment. Enable with `ZAHEEN_ENABLE_GOOGLE_MAPS_SCRAPER=
 
 ## 4. Geography sizing: Census County Business Patterns (`zaheen plan`)
 
-`GET api.census.gov/data/2022/cbp` with `NAICS2017=<code>`, `EMPSZES=001,220,230` (all / 5–9 /
-10–19 employees) by county, state or metro. `zaheen plan florists --state TX` and `GET /plan/
-florists?state=TX` rank geographies by 5–19 employee establishments and recommend `local`,
-`local_tight`, `state` or `national` scope before any crawl budget is spent. Requires the free key
-(`ZAHEEN_CENSUS_API_KEY`).
+`GET api.census.gov/data/2022/cbp` with `NAICS2017=<code>`, `LFO=001`, and one `EMPSZES` code per
+request (`001` all / `220` 5–9 / `230` 10–19 employees) by county, state or metro. Wildcards in
+`for`/`in` (`county:*`) are sent unencoded — Census returns HTTP 204 if they are percent-encoded.
+`zaheen plan florists --state TX` and `GET /plan/florists?state=TX` rank geographies by 5–19
+employee establishments and recommend `local`, `local_tight`, `state` or `national` scope before
+any crawl budget is spent. Requires the free key (`ZAHEEN_CENSUS_API_KEY`).
 
 ## 5. Website intelligence and tool stack
 

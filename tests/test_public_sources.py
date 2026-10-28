@@ -9,7 +9,14 @@ import httpx
 import pytest
 import respx
 
-from zaheendata.census import CensusCbpClient, CensusKeyRequired, assess_scope, parse_cbp_rows, state_fips
+from zaheendata.census import (
+    CensusCbpClient,
+    CensusKeyRequired,
+    assess_scope,
+    cbp_query_url,
+    parse_cbp_rows,
+    state_fips,
+)
 from zaheendata.enrich.owner import OwnerEnricher
 from zaheendata.http import HttpClient, ResponseCache
 from zaheendata.models import Address, Business, OwnerContact, SourceKind, SourceSearchSpec, WebsiteFeatures
@@ -471,6 +478,24 @@ def test_parse_cbp_rows_and_scope_recommendation():
         state_fips("ZZ")
 
 
+def test_cbp_query_url_keeps_census_wildcards():
+    url = cbp_query_url(
+        {
+            "get": "NAME,ESTAB,EMPSZES",
+            "NAICS2017": "238220",
+            "LFO": "001",
+            "EMPSZES": "220",
+            "for": "county:*",
+            "in": "state:48",
+            "key": "k",
+        }
+    )
+    assert "for=county:*" in url and "in=state:48" in url
+    assert "%2A" not in url and "%3A" not in url
+    metro = cbp_query_url({"for": "metropolitan statistical area/micropolitan statistical area:*"})
+    assert "metropolitan%20statistical%20area/micropolitan%20statistical%20area:*" in metro
+
+
 @respx.mock
 async def test_census_client_builds_request(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     ctx = _ctx(tmp_path)
@@ -483,21 +508,25 @@ async def test_census_client_builds_request(monkeypatch: pytest.MonkeyPatch, tmp
     def responder(request: httpx.Request) -> httpx.Response:
         qs = parse_qs(urlsplit(str(request.url)).query)
         assert qs["for"] == ["county:*"] and qs["in"] == ["state:48"]
-        assert qs["NAICS2017"] == ["238220"] and qs["EMPSZES"] == ["001,220,230"]
+        assert qs["NAICS2017"] == ["238220"] and qs["LFO"] == ["001"]
+        assert qs["EMPSZES"][0] in {"001", "220", "230"}
         assert qs["key"] == ["census-key"]
+        assert "county:*" in str(request.url) and "%2A" not in str(request.url)
+        size = qs["EMPSZES"][0]
+        estab = {"001": "900", "220": "400", "230": "300"}[size]
         return httpx.Response(
             200,
             json=[
                 ["NAME", "ESTAB", "EMPSZES", "NAICS2017", "state", "county"],
-                ["Travis County, Texas", "400", "220", "238220", "48", "453"],
+                ["Travis County, Texas", estab, size, "238220", "48", "453"],
             ],
         )
 
     respx.get(url__regex=r"https://api\.census\.gov/data/\d+/cbp.*").mock(side_effect=responder)
     ctx = _ctx(tmp_path)
     counts = await CensusCbpClient(ctx.http, ctx.settings).establishments("238220", "TX", "county")
-    assert counts[0].estab_5_9 == 400
-    assert ctx.http.ledger.calls["census.cbp"] == 1
+    assert counts[0].estab_5_9 == 400 and counts[0].estab_10_19 == 300 and counts[0].estab_all == 900
+    assert ctx.http.ledger.calls["census.cbp"] == 3
     await ctx.http.aclose()
 
 

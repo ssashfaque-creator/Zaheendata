@@ -8,8 +8,10 @@ national scope). Needs a free API key (api.census.gov/data/key_signup.html).
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote, urlencode
 
 from .http import HttpClient
 from .logging import get_logger
@@ -24,6 +26,7 @@ NAICS_VAR = "NAICS2017"
 EMPSZES_5_9 = "220"
 EMPSZES_10_19 = "230"
 EMPSZES_ALL = "001"
+LFO_ALL = "001"  # all legal forms; required classification dimension in CBP 2022+
 
 GEO_LEVELS: dict[str, tuple[str, str | None]] = {
     "state": ("state:{state}", None),
@@ -82,6 +85,23 @@ def parse_cbp_rows(rows: list[list[str]]) -> list[EstablishmentCount]:
     return sorted(out.values(), key=lambda c: -c.estab_5_19)
 
 
+def cbp_query_url(params: dict[str, str]) -> str:
+    """Build a CBP URL. Census returns 204 if ``:`` or ``*`` in ``for``/``in`` are percent-encoded."""
+    return f"{CBP_URL}?{urlencode(params, safe=':,*/', quote_via=quote)}"
+
+
+def merge_cbp_counts(chunks: list[list[EstablishmentCount]]) -> list[EstablishmentCount]:
+    """Fold per-size-class fetches into one row per geography."""
+    out: dict[str, EstablishmentCount] = {}
+    for counts in chunks:
+        for c in counts:
+            item = out.setdefault(c.geo_code, EstablishmentCount(geo_name=c.geo_name, geo_code=c.geo_code))
+            item.estab_5_9 += c.estab_5_9
+            item.estab_10_19 += c.estab_10_19
+            item.estab_all += c.estab_all
+    return sorted(out.values(), key=lambda c: -c.estab_5_19)
+
+
 class CensusCbpClient:
     def __init__(self, http: HttpClient, settings: Settings | None = None):
         self.http = http
@@ -98,31 +118,48 @@ class CensusCbpClient:
             )
         fips = state_fips(state) if state else ""
         for_clause, in_clause = GEO_LEVELS[level]
-        params: dict[str, Any] = {
-            "get": "NAME,ESTAB,EMPSZES",
-            NAICS_VAR: naics,
-            "EMPSZES": ",".join([EMPSZES_ALL, EMPSZES_5_9, EMPSZES_10_19]),
-            "for": for_clause.format(state=fips),
-        }
-        if in_clause:
-            params["in"] = in_clause.format(state=fips)
         key = self.settings.secret("census_api_key")
         if not key:
             raise CensusKeyRequired(
                 "api.census.gov requires a key: request one free at "
                 "https://api.census.gov/data/key_signup.html and set ZAHEEN_CENSUS_API_KEY"
             )
-        params["key"] = key
+        base: dict[str, str] = {
+            "get": "NAME,ESTAB,EMPSZES",
+            NAICS_VAR: naics,
+            "LFO": LFO_ALL,
+            "for": for_clause.format(state=fips),
+            "key": key,
+        }
+        if in_clause:
+            base["in"] = in_clause.format(state=fips)
         self.http.set_host_rate("api.census.gov", 2.0, concurrency=2)
-        resp = await self.http.get(CBP_URL, params=params, meter="census.cbp")
+        # One EMPSZES code per request: a comma list is not a valid CBP predicate and yields 204.
+        chunks = await asyncio.gather(
+            *[self._fetch({**base, "EMPSZES": size}) for size in (EMPSZES_ALL, EMPSZES_5_9, EMPSZES_10_19)]
+        )
+        return merge_cbp_counts(list(chunks))
+
+    async def _fetch(self, params: dict[str, str]) -> list[EstablishmentCount]:
+        url = cbp_query_url(params)
+        resp = await self.http.get(url, meter="census.cbp")
         if resp.status_code == 204:
-            return []  # Census answers 204 when no establishment matches the predicates
+            log.info("census.cbp.empty", empsz=params.get("EMPSZES"), for_clause=params.get("for"))
+            return []
         resp.raise_for_status()
         if "missing_key" in str(resp.url) or resp.text.lstrip().startswith("<"):
             raise CensusKeyRequired(
                 "api.census.gov rejected the request as unauthenticated; check ZAHEEN_CENSUS_API_KEY"
             )
-        return parse_cbp_rows(resp.json())
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            raise RuntimeError(f"Census CBP returned non-JSON ({resp.status_code})") from exc
+        if isinstance(payload, dict):
+            raise RuntimeError(f"Census CBP error: {payload.get('error') or payload}")
+        if not isinstance(payload, list):
+            raise RuntimeError(f"Census CBP unexpected payload: {type(payload).__name__}")
+        return parse_cbp_rows(payload)
 
 
 class CensusKeyRequired(RuntimeError):
