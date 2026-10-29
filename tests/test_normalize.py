@@ -1,4 +1,6 @@
 from zaheendata.normalize import (
+    canonicalize_website,
+    domain_from_url,
     is_own_website,
     is_usable_email,
     looks_like_company,
@@ -32,6 +34,14 @@ def test_person_vs_company() -> None:
 
 def test_person_display_flips_last_first() -> None:
     assert person_display_name("BURGOS, DAVID") == "David Burgos"
+
+
+def test_invalid_ipv6_urls_do_not_raise() -> None:
+    assert domain_from_url("https://[") == ""
+    assert domain_from_url("http://[bad") == ""
+    assert canonicalize_website("https://[::") == ""
+    found = parse_socials('<a href="https://[invalid/path">ig</a> https://instagram.com/coolairatx')
+    assert "instagram.com/coolairatx" in found["instagram"]
 
 
 def test_parse_socials_from_overture_blob() -> None:

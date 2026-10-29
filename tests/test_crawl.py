@@ -59,6 +59,12 @@ def test_jsonld_and_site_extras() -> None:
     assert "+15125550100" in signals["extra_phones"] or "+15125550199" in signals["extra_phones"]
 
 
+def test_malformed_ipv6_href_does_not_crash_extract() -> None:
+    html = '<a href="https://[invalid">bad</a><a href="https://instagram.com/coolairatx">ig</a>'
+    signals = extract_signals(html, "https://coolair.example/")
+    assert "instagram.com/coolairatx" in signals["instagram"]
+
+
 def test_junk_owner_copy_is_ignored() -> None:
     html = "<p>Meet the owner At Brooks Custom. Support Filters Warranty.</p>"
     signals = extract_signals(html, "https://brookscustomcomfort.com/")

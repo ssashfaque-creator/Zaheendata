@@ -5,7 +5,7 @@ import json
 import re
 from html import unescape
 from typing import Callable, Iterable
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 import httpx
 from bs4 import BeautifulSoup
@@ -19,6 +19,7 @@ from zaheendata.normalize import (
     looks_like_person,
     normalize_phone,
     parse_socials,
+    safe_urlparse,
 )
 
 USER_AGENT = "ZaheendataLeadResearch/0.1 (+https://github.com/ssashfaque-creator/Zaheendata)"
@@ -165,11 +166,16 @@ def extract_signals(html: str, url: str) -> dict:
     pain = [phrase for phrase in PAIN_PHRASES if phrase in blob]
 
     child_links = []
+    page = safe_urlparse(url)
     for anchor in soup.find_all("a", href=True):
-        href = urljoin(url, anchor["href"])
-        if urlparse(href).netloc != urlparse(url).netloc:
+        try:
+            href = urljoin(url, anchor["href"])
+        except ValueError:
             continue
-        path = urlparse(href).path.lower()
+        parsed = safe_urlparse(href)
+        if parsed is None or page is None or parsed.netloc != page.netloc:
+            continue
+        path = parsed.path.lower()
         if any(token in path for token in HREF_CANDIDATES):
             child_links.append(canonicalize_website(href) or href)
 
@@ -288,19 +294,25 @@ async def _fetch(client: httpx.AsyncClient, url: str) -> str:
 async def crawl_lead(client: httpx.AsyncClient, lead: Lead) -> Lead:
     if not lead.website:
         return lead
-    html = await _fetch(client, lead.website)
-    if not html:
-        lead.website_crawled = False
+    try:
+        html = await _fetch(client, lead.website)
+        if not html:
+            lead.website_crawled = False
+            lead.extra["crawl_attempted"] = True
+            return lead
+        combined = extract_signals(html, lead.website)
+        for child in combined.get("child_links", [])[: MAX_PAGES - 1]:
+            child_html = await _fetch(client, child)
+            if child_html:
+                merge_signals(combined, extract_signals(child_html, child))
+        apply_signals(lead, combined)
         lead.extra["crawl_attempted"] = True
         return lead
-    combined = extract_signals(html, lead.website)
-    for child in combined.get("child_links", [])[: MAX_PAGES - 1]:
-        child_html = await _fetch(client, child)
-        if child_html:
-            merge_signals(combined, extract_signals(child_html, child))
-    apply_signals(lead, combined)
-    lead.extra["crawl_attempted"] = True
-    return lead
+    except Exception:
+        lead.website_crawled = False
+        lead.extra["crawl_attempted"] = True
+        lead.extra.pop("_html", None)
+        return lead
 
 
 async def crawl_leads(
@@ -323,7 +335,11 @@ async def crawl_leads(
         async with semaphore:
             if should_stop and should_stop():
                 return lead
-            await crawl_lead(client, lead)
+            try:
+                await crawl_lead(client, lead)
+            except Exception:
+                lead.website_crawled = False
+                lead.extra["crawl_attempted"] = True
         html = lead.extra.get("_html", "")
         async with lock:
             if on_html and html:
