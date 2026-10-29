@@ -6,6 +6,7 @@ from zaheendata.checkpoint import HarvestState, json_records_ready
 from zaheendata.models import empty_lead
 from zaheendata.pipeline.enrich import enrich_live
 from zaheendata.pipeline.harvest import harvest, ordered_subsectors
+from zaheendata.pipeline.pool import copy_warehouse, merge_worker_warehouse, partition_trades
 from zaheendata.pipeline.ingest import attach_warehouse_overlays, hydrate_from_warehouse, ingest_license_json
 from zaheendata.pipeline.build import persist_leads
 from zaheendata.sources.overture import parquet_file_ready
@@ -304,6 +305,55 @@ def test_harvest_refetches_smoke_sample_parquet(tmp_path: Path, monkeypatch) -> 
     assert called["refetch"] is True
     log_text = (tmp_path / "harvest.log").read_text(encoding="utf-8")
     assert "smoke-test sample" in log_text
+
+
+def test_partition_keeps_in_progress_trade_on_worker_zero() -> None:
+    keys = ["plumbing_hvac", "electrical", "beauty_salons", "roofing"]
+    state = {
+        "plumbing_hvac": {"status": "running"},
+        "electrical": {"status": "pending"},
+        "beauty_salons": {"status": "pending"},
+        "roofing": {"status": "pending"},
+    }
+    buckets = partition_trades(keys, state, 3)
+    assert buckets[0] == ["plumbing_hvac"]
+    assert "electrical" not in buckets[0]
+    remaining = buckets[1] + buckets[2]
+    assert set(remaining) == {"electrical", "beauty_salons", "roofing"}
+
+
+def test_merge_worker_warehouse_copies_leads(tmp_path: Path) -> None:
+    main = tmp_path / "main.duckdb"
+    worker = tmp_path / "w1.duckdb"
+    lead = empty_lead(
+        name="Spark Electric",
+        business_id="place-elec",
+        domain="spark.example",
+        website="https://spark.example/",
+        website_crawled=True,
+        tech_stack="jobber",
+    )
+    persist_leads([lead], worker)
+    con = connect(worker)
+    con.execute(
+        "INSERT INTO snapshots VALUES ('spark.example', 'https://spark.example/', 'live_crawl', now(), 200, 10, '')"
+    )
+    con.close()
+    copy_warehouse(worker, main)
+    extra = empty_lead(
+        name="Nail Shop",
+        business_id="place-nail",
+        domain="nails.example",
+        website="https://nails.example/",
+        website_crawled=True,
+    )
+    persist_leads([extra], worker)
+    stats = merge_worker_warehouse(main, worker)
+    assert stats["leads"] >= 0
+    con = connect(main)
+    ids = {row[0] for row in con.execute("SELECT business_id FROM leads").fetchall()}
+    con.close()
+    assert "place-nail" in ids
 
 
 def test_reset_warehouse_deletes_db(tmp_path: Path) -> None:

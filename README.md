@@ -68,6 +68,10 @@ One command. It checkpoints after **every website** and after each download/inge
 # First full run. If a 5-row smoke parquet is present, it is replaced automatically.
 caffeinate -dims zaheendata harvest --geo TX --fresh
 
+# After the first trade is underway, split remaining trades across processes:
+# worker 0 keeps the in-progress trade on the main warehouse; others get copies.
+caffeinate -dims zaheendata harvest --geo TX --workers 4 --concurrency 8
+
 # Stop anytime with Ctrl+C, then continue:
 caffeinate -dims zaheendata harvest --geo TX
 

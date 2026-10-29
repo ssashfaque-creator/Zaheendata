@@ -22,12 +22,13 @@ from zaheendata.pipeline.ingest import (
 from zaheendata.pipeline.score import rank_leads, score_lead
 from zaheendata.sources.licenses_catalog import soda_source_keys
 from zaheendata.sources.overture import parquet_file_ready, parquet_row_count
+from zaheendata.subsectors import SUBSECTORS, get_subsector
+from zaheendata.pipeline.pool import partition_trades, run_trade_pool
+from zaheendata.warehouse import reset_warehouse, warehouse_stats
 
 # Statewide Texas across 17 trades is tens of thousands of places.
 # A leftover `--limit` smoke parquet is a few rows and must not be reused.
 MIN_FULL_PLACES = 100
-from zaheendata.subsectors import SUBSECTORS, get_subsector
-from zaheendata.warehouse import reset_warehouse, warehouse_stats
 
 PRIORITY_SUBSECTORS = (
     "plumbing_hvac",
@@ -77,6 +78,8 @@ def harvest(
     fresh: bool = False,
     refetch: bool = False,
     min_full_rows: int = MIN_FULL_PLACES,
+    workers: int = 1,
+    skip_setup: bool = False,
 ) -> dict:
     keys = ordered_subsectors(subsector_keys)
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -114,21 +117,64 @@ def harvest(
         "stopped": False,
         "resume_command": f"zaheendata harvest --geo {geo}",
         "trades": {},
+        "workers": workers,
     }
 
     try:
-        _download_places(
-            geo,
-            raw_dir,
-            refetch=refetch,
-            min_full_rows=min_full_rows,
-            state=state,
-            progress=progress,
-            stop=stop,
-            summary=summary,
-        )
-        _download_licenses(geo, raw_dir, refetch, state, progress, stop, summary)
-        _ingest(geo, raw_dir, warehouse, state, progress, stop, summary)
+        if skip_setup:
+            progress.emit("skip-setup: using the existing warehouse")
+        else:
+            _download_places(
+                geo,
+                raw_dir,
+                refetch=refetch,
+                min_full_rows=min_full_rows,
+                state=state,
+                progress=progress,
+                stop=stop,
+                summary=summary,
+            )
+            _download_licenses(geo, raw_dir, refetch, state, progress, stop, summary)
+            _ingest(geo, raw_dir, warehouse, state, progress, stop, summary)
+        if workers > 1:
+            assignments = partition_trades(keys, state.data.get("subsectors", {}), workers)
+            progress.emit(
+                "pool: "
+                + "; ".join(
+                    f"w{index}={','.join(trades) or 'idle'}" for index, trades in enumerate(assignments)
+                )
+            )
+            summary.update(
+                run_trade_pool(
+                    geo=geo,
+                    assignments=assignments,
+                    warehouse=warehouse,
+                    raw_dir=raw_dir,
+                    out_dir=out_dir,
+                    state_path=state_path,
+                    log_path=log_path,
+                    keep=keep,
+                    limit=limit,
+                    crawl=crawl,
+                    concurrency=concurrency,
+                    progress=progress,
+                    stop=stop,
+                )
+            )
+            if stop.requested:
+                raise HarvestStopped(summary)
+            remaining = [
+                key
+                for key in keys
+                if HarvestState.load(state_path).subsector(key).get("status") != "complete"
+            ]
+            if remaining:
+                progress.emit("pool paused; unfinished trades: " + ", ".join(remaining))
+                raise HarvestStopped(summary)
+            state.set_phase("complete")
+            progress.emit("harvest complete")
+            summary["warehouse_stats"] = warehouse_stats(warehouse)
+            return summary
         for key in keys:
             _raise_if_stopped(stop, state, summary)
             summary["trades"][key] = _harvest_subsector(

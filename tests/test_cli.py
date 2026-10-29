@@ -22,6 +22,9 @@ def test_parser_exposes_download_first_commands() -> None:
     assert harvest.geo == "TX"
     assert harvest.fresh is True
     assert harvest.crawl == "none"
+    pool = parser.parse_args(["harvest", "--geo", "TX", "--workers", "4", "--concurrency", "8"])
+    assert pool.workers == 4
+    assert pool.concurrency == 8
 
     reset = parser.parse_args(["reset"])
     assert reset.command == "reset"

@@ -95,6 +95,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     harvest_cmd.add_argument("--crawl", default="live", help="live or none.")
     harvest_cmd.add_argument("--concurrency", type=int, default=4)
+    harvest_cmd.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Manager plus this many trade workers. 1 = single process. 4 = split remaining trades.",
+    )
+    harvest_cmd.add_argument(
+        "--skip-setup",
+        action="store_true",
+        help="Skip Overture/license download and ingest. Used by worker processes.",
+    )
+    harvest_cmd.add_argument("--state", type=Path, help="harvest_state.json path.")
+    harvest_cmd.add_argument("--log", type=Path, help="Progress log path.")
 
     reset = sub.add_parser("reset", help="Delete the DuckDB warehouse. Downloaded files are kept.")
     reset.add_argument("--warehouse", type=Path, default=None)
@@ -355,12 +368,16 @@ def main(argv: list[str] | None = None) -> int:
             warehouse=args.warehouse,
             raw_dir=args.raw_dir,
             out_dir=args.out_dir,
+            state_path=args.state,
+            log_path=args.log,
             keep=args.keep,
             limit=args.limit,
             crawl=args.crawl,
             concurrency=args.concurrency,
             fresh=args.fresh,
             refetch=args.refetch,
+            workers=args.workers,
+            skip_setup=args.skip_setup,
         )
         print(json.dumps(summary, indent=2, default=str))
         return 0
