@@ -279,6 +279,44 @@ def test_harvest_stop_mid_crawl_then_resume(tmp_path: Path, monkeypatch) -> None
     assert calls["n"] >= 2
 
 
+def test_harvest_georgia_does_not_touch_texas_data(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    tx_root = tmp_path / "data"
+    tx_root.mkdir()
+    tx_warehouse = tx_root / "warehouse.duckdb"
+    tx_warehouse.write_text("texas-do-not-touch", encoding="utf-8")
+    tx_log = tx_root / "harvest.log"
+    tx_log.write_text("texas log", encoding="utf-8")
+    tx_state = tx_root / "harvest_state.json"
+    tx_state.write_text('{"geo":"TX"}', encoding="utf-8")
+
+    ga_raw = tmp_path / "data" / "GA" / "raw"
+    ga_raw.mkdir(parents=True)
+    _write_multi_parquet(ga_raw / "overture_all_GA.parquet")
+
+    summary = harvest(
+        geo="GA",
+        subsector_keys=["plumbing_hvac"],
+        warehouse=Path("data/warehouse.duckdb"),
+        raw_dir=Path("data/raw"),
+        out_dir=Path("data/exports"),
+        crawl="none",
+        min_full_rows=0,
+    )
+    assert Path(summary["warehouse"]) == Path("data/GA/warehouse.duckdb")
+    assert Path(summary["raw_dir"]) == Path("data/GA/raw")
+    assert Path(summary["out_dir"]) == Path("data/GA/exports")
+    assert (tmp_path / "data/GA/warehouse.duckdb").exists()
+    assert (tmp_path / "data/GA/exports/GA_plumbing_hvac.csv").exists()
+    assert (tmp_path / "data/GA/harvest.log").exists()
+    log_text = (tmp_path / "data/GA/harvest.log").read_text(encoding="utf-8")
+    assert "no unattended bulk feed for GA" in log_text
+    assert tx_warehouse.read_text(encoding="utf-8") == "texas-do-not-touch"
+    assert tx_log.read_text(encoding="utf-8") == "texas log"
+    assert tx_state.read_text(encoding="utf-8") == '{"geo":"TX"}'
+    assert not (tmp_path / "data/exports").exists()
+
+
 def test_harvest_refetches_smoke_sample_parquet(tmp_path: Path, monkeypatch) -> None:
     raw = tmp_path / "raw"
     _seed_raw(raw)

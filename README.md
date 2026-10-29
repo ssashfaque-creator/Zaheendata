@@ -60,29 +60,52 @@ pip install -e .
 
 No API key is required for `download` / `build` / `harvest` on Overture. DuckDB talks to the public S3 bucket with `httpfs`. Keep the laptop awake with `caffeinate` (shown below) so a long harvest is not suspended.
 
-## Texas statewide harvest (all 17 trades)
+## Georgia statewide harvest (all 17 trades)
 
-One command. It checkpoints after **every website** and after each download/ingest step. Press Ctrl+C whenever you want; the next run of the **same command without `--fresh`** continues from the last saved site.
+Texas is paused under `data/` — leave that folder alone. `--geo GA` writes only to `data/GA/`.
+
+Georgia SOS contractor and cosmetology rosters are paid files with no public API. Harvest still runs: Overture places → owned websites → live crawl → tool detection. License number / person-owner overlay is skipped until a roster is bought later.
 
 ```bash
-# First full run. If a 5-row smoke parquet is present, it is replaced automatically.
-caffeinate -dims zaheendata harvest --geo TX --fresh
+# Full state Georgia. Do not pass --fresh (that would wipe a new Georgia warehouse, not Texas).
+caffeinate -dims zaheendata harvest --geo GA --workers 4 --concurrency 8
 
+# Stop with Ctrl+C, then the same command resumes from the last saved site:
+caffeinate -dims zaheendata harvest --geo GA --workers 4 --concurrency 8
+
+# Watch Georgia only (not the Texas log)
+tail -f data/GA/harvest.log
+zaheendata stats --geo GA
+```
+
+| Georgia file | Path |
+| --- | --- |
+| Warehouse | `data/GA/warehouse.duckdb` |
+| Overture extract | `data/GA/raw/overture_all_GA.parquet` |
+| Progress log | `data/GA/harvest.log` |
+| Checkpoints | `data/GA/harvest_state.json` |
+| CSVs | `data/GA/exports/GA_<trade>.csv` |
+
+`--limit` caps **crawls per trade only**. It does not shrink the Overture download. Wait until `data/GA/harvest.log` shows tens of thousands of places before expecting crawl progress.
+
+## Texas statewide harvest (paused — resume later)
+
+Same checkpoints as Georgia. Texas stays in the original `data/` folder if `data/warehouse.duckdb` already exists.
+
+```bash
 # After the first trade is underway, split remaining trades across processes:
 # worker 0 keeps the in-progress trade on the main warehouse; others get copies.
 caffeinate -dims zaheendata harvest --geo TX --workers 4 --concurrency 8
 
-# Stop anytime with Ctrl+C, then continue:
-caffeinate -dims zaheendata harvest --geo TX
+# Stop anytime with Ctrl+C, then continue (never --fresh unless you mean to wipe Texas):
+caffeinate -dims zaheendata harvest --geo TX --workers 4 --concurrency 8
 
-# Watch progress in another terminal
+# Watch Texas only
 tail -f data/harvest.log
-zaheendata stats
+zaheendata stats --geo TX
 ```
 
-Do **not** pass `--fresh` when resuming. That flag deletes `data/warehouse.duckdb` and `data/harvest_state.json`. Downloaded Overture files are reused only if they look like a full state extract (100+ places). A leftover `--limit` smoke parquet is discarded automatically.
-
-`--limit` caps **crawls per trade only**. It does not shrink the Overture download. A 5-second harvest with `ingested_places: 5` means the smoke parquet was reused — delete it or rerun after updating, and wait for a file with tens of thousands of places.
+Do **not** pass `--fresh` when resuming. That flag deletes that state's warehouse and `harvest_state.json`. Downloaded Overture files are reused only if they look like a full state extract (100+ places). A leftover `--limit` smoke parquet is discarded automatically.
 
 Exports land in `data/exports/TX_<trade>.csv`. The DuckDB warehouse is the source of truth if a run is interrupted mid-file.
 
@@ -119,7 +142,7 @@ zaheendata diagnose path/to/old-export.csv
 
 ## Warehouse
 
-DuckDB file `data/warehouse.duckdb` (override with `ZAHEENDATA_WAREHOUSE`):
+DuckDB file `data/warehouse.duckdb` for the original Texas run (override with `ZAHEENDATA_WAREHOUSE`). `--geo GA` uses `data/GA/warehouse.duckdb` instead:
 
 - `places` — Overture businesses, including those without a website
 - `licenses` — person owners where a board file exists

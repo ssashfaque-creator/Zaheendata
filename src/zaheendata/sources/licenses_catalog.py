@@ -75,6 +75,22 @@ FEEDS: tuple[LicenseFeed, ...] = (
         url="https://data.ny.gov/",
         notes="NY appearance-enhancement business licenses on data.ny.gov.",
     ),
+    LicenseFeed(
+        key="ga_cilb",
+        states=("GA",),
+        subsectors=("plumbing_hvac", "electrical", "remodelers"),
+        kind="manual",
+        url="https://sos.ga.gov/licensing-division-license-lookup",
+        notes="Georgia SOS CILB (conditioned air, electrical, plumber). Bulk rosters are paid; no public API.",
+    ),
+    LicenseFeed(
+        key="ga_cosmetology",
+        states=("GA",),
+        subsectors=("beauty_salons", "nail_salons"),
+        kind="manual",
+        url="https://sos.ga.gov/licensing-division-license-lookup",
+        notes="Georgia Board of Cosmetology and Barbers. Salon/nail rosters are paid SOS files.",
+    ),
 )
 
 

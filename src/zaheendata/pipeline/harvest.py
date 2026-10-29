@@ -4,7 +4,7 @@ import signal
 from pathlib import Path
 
 from zaheendata.checkpoint import HarvestState, ProgressLog, StopFlag
-from zaheendata.geo import parquet_stem, state_from_geo
+from zaheendata.geo import default_harvest_layout, parquet_stem, state_from_geo
 from zaheendata.models import Lead
 from zaheendata.pipeline.build import persist_leads, tool_histogram
 from zaheendata.pipeline.download import download_licenses_for, download_overture
@@ -20,7 +20,7 @@ from zaheendata.pipeline.ingest import (
     places_to_leads,
 )
 from zaheendata.pipeline.score import rank_leads, score_lead
-from zaheendata.sources.licenses_catalog import soda_source_keys
+from zaheendata.sources.licenses_catalog import list_feeds, soda_source_keys
 from zaheendata.sources.overture import parquet_file_ready, parquet_row_count
 from zaheendata.subsectors import SUBSECTORS, get_subsector
 from zaheendata.pipeline.pool import partition_trades, run_trade_pool
@@ -82,6 +82,18 @@ def harvest(
     skip_setup: bool = False,
 ) -> dict:
     keys = ordered_subsectors(subsector_keys)
+    using_cli_defaults = (
+        warehouse == Path("data/warehouse.duckdb")
+        and raw_dir == Path("data/raw")
+        and out_dir == Path("data/exports")
+    )
+    if using_cli_defaults:
+        layout = default_harvest_layout(geo)
+        warehouse = layout["warehouse"]
+        raw_dir = layout["raw_dir"]
+        out_dir = layout["out_dir"]
+        state_path = state_path or layout["state"]
+        log_path = log_path or layout["log"]
     raw_dir.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
     state_path = state_path or raw_dir.parent / "harvest_state.json"
@@ -115,7 +127,9 @@ def harvest(
         "raw_dir": str(raw_dir),
         "out_dir": str(out_dir),
         "stopped": False,
-        "resume_command": f"zaheendata harvest --geo {geo}",
+        "resume_command": (
+            f"zaheendata harvest --geo {geo} --workers {workers} --concurrency {concurrency}"
+        ),
         "trades": {},
         "workers": workers,
     }
@@ -264,6 +278,12 @@ def _download_licenses(
     state.set_phase("download_licenses")
     paths = download_licenses_for(geo=geo, subsector_key=None, raw_dir=raw_dir, refetch=refetch)
     recorded = state.data.setdefault("licenses", {})
+    if not paths:
+        st = state_from_geo(geo) or geo
+        progress.emit(
+            f"licenses: no unattended bulk feed for {st}; "
+            "continuing with Overture places, websites, and tool detection"
+        )
     for path in paths:
         recorded[path.stem] = {"status": "ready", "path": str(path), "bytes": path.stat().st_size}
         progress.emit(f"licenses: {path.name} ({path.stat().st_size} bytes)")
@@ -295,8 +315,12 @@ def _ingest(
         state.save()
         progress.emit(f"ingest: {count} places")
     license_count = 0
-    for path in sorted(raw_dir.glob("tx_*.json")):
-        license_count += ingest_license_json(path, warehouse, state=state_from_geo(geo) or "")
+    st = state_from_geo(geo) or ""
+    for feed in list_feeds(state=st or None):
+        path = raw_dir / f"{feed.key}.json"
+        if not path.exists() or feed.kind != "soda":
+            continue
+        license_count += ingest_license_json(path, warehouse, state=st)
         progress.emit(f"ingest: licenses from {path.name}")
     ingest_info["licenses"] = license_count
     state.save()

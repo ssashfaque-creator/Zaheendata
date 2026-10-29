@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 # WGS84 bounding boxes used to slice Overture without downloading the globe.
 # Values are (west, south, east, north).
 
@@ -118,3 +120,20 @@ def parquet_stem(geo: str, subsector_key: str | None) -> str:
     geo_part = geo.replace(",", "_").replace(" ", "")
     sector = subsector_key or "all"
     return f"overture_{sector}_{geo_part}"
+
+
+def default_harvest_layout(geo: str) -> dict[str, Path]:
+    """Keep Texas on the original data/ folder if that run already exists."""
+    state = (state_from_geo(geo) or "US").upper()
+    if state == "TX" and Path("data/warehouse.duckdb").exists():
+        root = Path("data")
+    else:
+        root = Path("data") / state
+    return {
+        "root": root,
+        "warehouse": root / "warehouse.duckdb",
+        "raw_dir": root / "raw",
+        "out_dir": root / "exports",
+        "state": root / "harvest_state.json",
+        "log": root / "harvest.log",
+    }
