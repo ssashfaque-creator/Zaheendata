@@ -317,6 +317,45 @@ def test_harvest_georgia_does_not_touch_texas_data(tmp_path: Path, monkeypatch) 
     assert not (tmp_path / "data/exports").exists()
 
 
+def test_harvest_rhode_island_does_not_touch_texas_or_georgia(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    tx_root = tmp_path / "data"
+    tx_root.mkdir()
+    tx_warehouse = tx_root / "warehouse.duckdb"
+    tx_warehouse.write_text("texas-do-not-touch", encoding="utf-8")
+    ga_root = tx_root / "GA"
+    ga_root.mkdir()
+    ga_warehouse = ga_root / "warehouse.duckdb"
+    ga_warehouse.write_text("georgia-do-not-touch", encoding="utf-8")
+    ga_log = ga_root / "harvest.log"
+    ga_log.write_text("georgia log", encoding="utf-8")
+
+    ri_raw = tmp_path / "data" / "RI" / "raw"
+    ri_raw.mkdir(parents=True)
+    _write_multi_parquet(ri_raw / "overture_all_RI.parquet")
+
+    summary = harvest(
+        geo="RI",
+        subsector_keys=["plumbing_hvac"],
+        warehouse=Path("data/warehouse.duckdb"),
+        raw_dir=Path("data/raw"),
+        out_dir=Path("data/exports"),
+        crawl="none",
+        min_full_rows=0,
+    )
+    assert Path(summary["warehouse"]) == Path("data/RI/warehouse.duckdb")
+    assert Path(summary["raw_dir"]) == Path("data/RI/raw")
+    assert Path(summary["out_dir"]) == Path("data/RI/exports")
+    assert (tmp_path / "data/RI/warehouse.duckdb").exists()
+    assert (tmp_path / "data/RI/exports/RI_plumbing_hvac.csv").exists()
+    log_text = (tmp_path / "data/RI/harvest.log").read_text(encoding="utf-8")
+    assert "no unattended bulk feed for RI" in log_text
+    assert tx_warehouse.read_text(encoding="utf-8") == "texas-do-not-touch"
+    assert ga_warehouse.read_text(encoding="utf-8") == "georgia-do-not-touch"
+    assert ga_log.read_text(encoding="utf-8") == "georgia log"
+    assert not (tmp_path / "data/exports").exists()
+
+
 def test_harvest_refetches_smoke_sample_parquet(tmp_path: Path, monkeypatch) -> None:
     raw = tmp_path / "raw"
     _seed_raw(raw)

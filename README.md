@@ -60,7 +60,35 @@ pip install -e .
 
 No API key is required for `download` / `build` / `harvest` on Overture. DuckDB talks to the public S3 bucket with `httpfs`. Keep the laptop awake with `caffeinate` (shown below) so a long harvest is not suspended.
 
-## Georgia statewide harvest (all 17 trades)
+## Rhode Island statewide harvest (all 17 trades)
+
+Texas is paused under `data/`. Georgia is paused under `data/GA/`. Leave both folders alone. `--geo RI` writes only to `data/RI/`.
+
+Rhode Island DLT contractor lists are $50 per occupation. CRLB is lookup-only. RIDOH salon Excel is free but a website picker, not an API. Harvest still runs: Overture places → owned websites → live crawl → tool detection.
+
+```bash
+# Full state Rhode Island. Do not pass --fresh.
+caffeinate -dims zaheendata harvest --geo RI --workers 4 --concurrency 8
+
+# Stop with Ctrl+C, then the same command resumes from the last saved site:
+caffeinate -dims zaheendata harvest --geo RI --workers 4 --concurrency 8
+
+# Watch Rhode Island only
+tail -f data/RI/harvest.log
+zaheendata stats --geo RI
+```
+
+| Rhode Island file | Path |
+| --- | --- |
+| Warehouse | `data/RI/warehouse.duckdb` |
+| Overture extract | `data/RI/raw/overture_all_RI.parquet` |
+| Progress log | `data/RI/harvest.log` |
+| Checkpoints | `data/RI/harvest_state.json` |
+| CSVs | `data/RI/exports/RI_<trade>.csv` |
+
+`--limit` caps **crawls per trade only**. It does not shrink the Overture download. Rhode Island is small; wait until the log shows the place count before expecting crawl lines.
+
+## Georgia statewide harvest (paused — resume later)
 
 Texas is paused under `data/` — leave that folder alone. `--geo GA` writes only to `data/GA/`.
 
@@ -142,7 +170,7 @@ zaheendata diagnose path/to/old-export.csv
 
 ## Warehouse
 
-DuckDB file `data/warehouse.duckdb` for the original Texas run (override with `ZAHEENDATA_WAREHOUSE`). `--geo GA` uses `data/GA/warehouse.duckdb` instead:
+DuckDB file `data/warehouse.duckdb` for the original Texas run (override with `ZAHEENDATA_WAREHOUSE`). `--geo GA` uses `data/GA/warehouse.duckdb`. `--geo RI` uses `data/RI/warehouse.duckdb`.
 
 - `places` — Overture businesses, including those without a website
 - `licenses` — person owners where a board file exists

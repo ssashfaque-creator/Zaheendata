@@ -21,6 +21,7 @@ def test_state_from_geo() -> None:
 def test_parquet_stem() -> None:
     assert parquet_stem("Austin,TX", "plumbing_hvac") == "overture_plumbing_hvac_Austin_TX"
     assert parquet_stem("GA", None) == "overture_all_GA"
+    assert parquet_stem("RI", None) == "overture_all_RI"
 
 
 def test_georgia_bbox_is_statewide() -> None:
@@ -46,9 +47,13 @@ def test_texas_keeps_legacy_folder_when_warehouse_exists(tmp_path, monkeypatch) 
     (tmp_path / "data" / "warehouse.duckdb").write_bytes(b"tx")
     tx = default_harvest_layout("TX")
     ga = default_harvest_layout("GA")
+    ri = default_harvest_layout("RI")
     assert tx["warehouse"] == Path("data/warehouse.duckdb")
     assert ga["warehouse"] == Path("data/GA/warehouse.duckdb")
+    assert ri["warehouse"] == Path("data/RI/warehouse.duckdb")
     assert ga["warehouse"] != tx["warehouse"]
+    assert ri["warehouse"] != tx["warehouse"]
+    assert ri["warehouse"] != ga["warehouse"]
 
 
 def test_georgia_has_no_free_soda_license_feed() -> None:
@@ -58,3 +63,30 @@ def test_georgia_has_no_free_soda_license_feed() -> None:
     keys = {feed.key for feed in list_feeds(state="GA")}
     assert "ga_cilb" in keys
     assert "ga_cosmetology" in keys
+
+
+def test_rhode_island_bbox_is_statewide() -> None:
+    west, south, east, north = resolve_bbox("RI")
+    assert west < -71.5 and east > -71.2
+    providence = resolve_bbox("Providence,RI")
+    assert west < providence[0] < providence[2] < east
+    assert south < providence[1] < providence[3] < north
+
+
+def test_rhode_island_harvest_layout_is_isolated() -> None:
+    layout = default_harvest_layout("RI")
+    assert layout["warehouse"] == Path("data/RI/warehouse.duckdb")
+    assert layout["raw_dir"] == Path("data/RI/raw")
+    assert layout["out_dir"] == Path("data/RI/exports")
+    assert layout["state"] == Path("data/RI/harvest_state.json")
+    assert layout["log"] == Path("data/RI/harvest.log")
+
+
+def test_rhode_island_has_no_free_soda_license_feed() -> None:
+    from zaheendata.sources.licenses_catalog import list_feeds, soda_source_keys
+
+    assert soda_source_keys("RI") == set()
+    keys = {feed.key for feed in list_feeds(state="RI")}
+    assert "ri_dlt_trades" in keys
+    assert "ri_crlb" in keys
+    assert "ri_ridoh_hair" in keys

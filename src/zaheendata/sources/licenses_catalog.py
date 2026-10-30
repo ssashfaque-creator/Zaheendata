@@ -91,6 +91,30 @@ FEEDS: tuple[LicenseFeed, ...] = (
         url="https://sos.ga.gov/licensing-division-license-lookup",
         notes="Georgia Board of Cosmetology and Barbers. Salon/nail rosters are paid SOS files.",
     ),
+    LicenseFeed(
+        key="ri_dlt_trades",
+        states=("RI",),
+        subsectors=("plumbing_hvac", "electrical"),
+        kind="manual",
+        url="https://www.ri.gov/dlt/bulklicense/",
+        notes="RI DLT professional trades (plumber, electrician, mechanical). $50 per occupation; no public API.",
+    ),
+    LicenseFeed(
+        key="ri_crlb",
+        states=("RI",),
+        subsectors=("remodelers", "roofing", "painting"),
+        kind="manual",
+        url="https://datadbr.ri.gov/crb-search/contractor-search.php",
+        notes="RI Contractors' Registration and Licensing Board. Lookup only; no bulk export.",
+    ),
+    LicenseFeed(
+        key="ri_ridoh_hair",
+        states=("RI",),
+        subsectors=("beauty_salons", "nail_salons"),
+        kind="manual",
+        url="https://health.ri.gov/licensing/licensee-lists",
+        notes="RIDOH hairdressing/barber/shop Excel is free via the website picker, not an unattended bulk API.",
+    ),
 )
 
 

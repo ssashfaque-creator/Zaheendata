@@ -64,3 +64,12 @@ def test_parser_exposes_download_first_commands() -> None:
 
     stats = parser.parse_args(["stats", "--geo", "GA"])
     assert stats.geo == "GA"
+
+    rhode = parser.parse_args(["harvest", "--geo", "RI", "--workers", "4", "--concurrency", "8"])
+    apply_harvest_layout(rhode)
+    assert rhode.geo == "RI"
+    assert rhode.warehouse == Path("data/RI/warehouse.duckdb")
+    assert rhode.raw_dir == Path("data/RI/raw")
+    assert rhode.out_dir == Path("data/RI/exports")
+    assert rhode.state == Path("data/RI/harvest_state.json")
+    assert rhode.log == Path("data/RI/harvest.log")

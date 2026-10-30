@@ -70,7 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     harvest_cmd.add_argument(
         "--geo",
         default="TX",
-        help="State code (GA, TX) or US. Default TX. Non-Texas states write under data/<ST>/ so Texas data/ is left alone.",
+        help="State code (RI, GA, TX) or US. Default TX. Non-Texas states write under data/<ST>/ so Texas data/ is left alone.",
     )
     harvest_cmd.add_argument(
         "--subsector",
