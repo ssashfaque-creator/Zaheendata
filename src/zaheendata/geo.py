@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 # WGS84 bounding boxes used to slice Overture without downloading the globe.
 # Values are (west, south, east, north).
 
@@ -72,6 +74,7 @@ CITY_BBOX: dict[tuple[str, str], tuple[float, float, float, float]] = {
     ("denver", "co"): (-105.15, 39.61, -104.71, 39.91),
     ("seattle", "wa"): (-122.44, 47.49, -122.22, 47.73),
     ("atlanta", "ga"): (-84.55, 33.64, -84.28, 33.89),
+    ("providence", "ri"): (-71.48, 41.77, -71.35, 41.86),
     ("boston", "ma"): (-71.19, 42.23, -70.92, 42.40),
     ("philadelphia", "pa"): (-75.28, 39.87, -75.04, 40.05),
     ("detroit", "mi"): (-83.29, 42.25, -82.91, 42.45),
@@ -118,3 +121,20 @@ def parquet_stem(geo: str, subsector_key: str | None) -> str:
     geo_part = geo.replace(",", "_").replace(" ", "")
     sector = subsector_key or "all"
     return f"overture_{sector}_{geo_part}"
+
+
+def default_harvest_layout(geo: str) -> dict[str, Path]:
+    """Keep Texas on the original data/ folder if that run already exists."""
+    state = (state_from_geo(geo) or "US").upper()
+    if state == "TX" and Path("data/warehouse.duckdb").exists():
+        root = Path("data")
+    else:
+        root = Path("data") / state
+    return {
+        "root": root,
+        "warehouse": root / "warehouse.duckdb",
+        "raw_dir": root / "raw",
+        "out_dir": root / "exports",
+        "state": root / "harvest_state.json",
+        "log": root / "harvest.log",
+    }

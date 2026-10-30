@@ -192,7 +192,93 @@ def places_to_leads(
     return leads
 
 
-def attach_warehouse_overlays(leads: list[Lead], warehouse: Path | None = None) -> list[Lead]:
+HYDRATE_FIELDS = (
+    "website_crawled",
+    "owner_name",
+    "owner_email",
+    "owner_phone",
+    "owner_title",
+    "owner_linkedin",
+    "owner_source",
+    "owner_confidence",
+    "email_is_role_account",
+    "online_booking",
+    "booking_provider",
+    "quote_form",
+    "says_call_for_quote",
+    "emergency_service",
+    "maintenance_plan",
+    "recurring_service",
+    "free_estimate",
+    "online_store",
+    "store_platform",
+    "sells_gift_cards",
+    "hosts_events",
+    "instagram",
+    "facebook",
+    "youtube",
+    "founded_year",
+    "family_owned",
+    "financing",
+    "licensed_bonded_insured",
+    "extra_phones",
+    "tech_stack",
+    "tool_categories",
+    "pain_mentions",
+    "pain_examples",
+    "license_number",
+    "license_status",
+    "license_type",
+    "score_total",
+    "rank",
+    "status",
+    "score_evidence",
+    "busy_and_growing",
+    "admin_pain",
+    "multi_tool",
+    "owner_reachable",
+    "subsector_signal",
+)
+
+
+def hydrate_from_warehouse(leads: list[Lead], warehouse: Path | None = None) -> list[Lead]:
+    con = connect(warehouse)
+    try:
+        rows = con.execute("SELECT * FROM leads").fetchall()
+        columns = [item[0] for item in con.description]
+    except Exception:
+        con.close()
+        return leads
+    con.close()
+    by_id: dict[str, dict] = {}
+    by_domain: dict[str, dict] = {}
+    for row in rows:
+        data = dict(zip(columns, row))
+        business_id = data.get("business_id") or ""
+        domain = (data.get("domain") or "").lower()
+        if business_id:
+            by_id[str(business_id)] = data
+        if domain:
+            by_domain[domain] = data
+    for lead in leads:
+        saved = by_id.get(lead.business_id) or by_domain.get((lead.domain or "").lower())
+        if not saved:
+            continue
+        for field in HYDRATE_FIELDS:
+            value = saved.get(field)
+            if value in (None, ""):
+                continue
+            setattr(lead, field, value)
+        for source in str(saved.get("sources") or "").split(";"):
+            lead.merge_source(source.strip())
+    return leads
+
+
+def attach_warehouse_overlays(
+    leads: list[Lead],
+    warehouse: Path | None = None,
+    allowed_sources: set[str] | None = None,
+) -> list[Lead]:
     con = connect(warehouse)
     licenses = con.execute(
         "SELECT business_name, owner_name, owner_is_person, license_number, license_status, phone, name_key, source, license_type FROM licenses"
@@ -201,6 +287,8 @@ def attach_warehouse_overlays(leads: list[Lead], warehouse: Path | None = None) 
         "SELECT borrower_name, jobs_reported, franchise_name, name_key, state FROM ppp"
     ).fetchall()
     con.close()
+    if allowed_sources is not None:
+        licenses = [row for row in licenses if row[7] in allowed_sources]
     lic_by_key = {row[6]: row for row in licenses if row[6]}
     lic_by_phone = {phone_key(row[5]): row for row in licenses if row[5]}
     lic_by_distinct: dict[str, list] = {}

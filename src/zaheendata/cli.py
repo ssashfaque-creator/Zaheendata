@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-from zaheendata.geo import resolve_bbox
+from zaheendata.geo import default_harvest_layout, resolve_bbox
 from zaheendata.pipeline.build import build_national, persist_leads
 from zaheendata.pipeline.diagnose import diagnose_csv, render_report
 from zaheendata.pipeline.download import download_licenses_for, download_overture, download_ppp_for
@@ -24,7 +24,7 @@ from zaheendata.pipeline.score import rank_leads, score_lead
 from zaheendata.sources.licenses_catalog import FEEDS, list_feeds
 from zaheendata.sources.overture import OVERTURE_RELEASE, probe_places
 from zaheendata.subsectors import SUBSECTORS, get_subsector
-from zaheendata.warehouse import warehouse_stats
+from zaheendata.warehouse import reset_warehouse, warehouse_stats
 
 
 def _load_dotenv(path: Path) -> None:
@@ -62,6 +62,61 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--concurrency", type=int, default=8)
     build.add_argument("--licenses", action="store_true", help="Also download matching SODA license feeds.")
     build.add_argument("--ppp", action="store_true", help="Overlay SBA PPP jobs_reported (size proxy, not discovery).")
+
+    harvest_cmd = sub.add_parser(
+        "harvest",
+        help="Resumable statewide pull for every trade. Ctrl+C saves; rerun the same command to continue.",
+    )
+    harvest_cmd.add_argument(
+        "--geo",
+        default="TX",
+        help="State code (RI, GA, TX) or US. Default TX. Non-Texas states write under data/<ST>/ so Texas data/ is left alone.",
+    )
+    harvest_cmd.add_argument(
+        "--subsector",
+        nargs="*",
+        choices=sorted(SUBSECTORS),
+        help="Default: all 17 trades. Pass one or more to restrict.",
+    )
+    harvest_cmd.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Delete the warehouse and harvest_state.json first. Keeps downloaded parquets.",
+    )
+    harvest_cmd.add_argument(
+        "--refetch",
+        action="store_true",
+        help="Re-download Overture and license files even if they already exist.",
+    )
+    harvest_cmd.add_argument("--warehouse", type=Path, default=None)
+    harvest_cmd.add_argument("--raw-dir", type=Path, default=Path("data/raw"))
+    harvest_cmd.add_argument("--out-dir", type=Path, default=Path("data/exports"))
+    harvest_cmd.add_argument("--keep", type=int, default=100)
+    harvest_cmd.add_argument(
+        "--limit",
+        type=int,
+        help="Cap crawled sites per trade only. Does not shrink the Overture download.",
+    )
+    harvest_cmd.add_argument("--crawl", default="live", help="live or none.")
+    harvest_cmd.add_argument("--concurrency", type=int, default=4)
+    harvest_cmd.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Manager plus this many trade workers. 1 = single process. 4 = split remaining trades.",
+    )
+    harvest_cmd.add_argument(
+        "--skip-setup",
+        action="store_true",
+        help="Skip Overture/license download and ingest. Used by worker processes.",
+    )
+    harvest_cmd.add_argument("--state", type=Path, help="harvest_state.json path.")
+    harvest_cmd.add_argument("--log", type=Path, help="Progress log path.")
+
+    reset = sub.add_parser("reset", help="Delete the DuckDB warehouse. Downloaded files are kept.")
+    reset.add_argument("--geo", help="State whose warehouse to reset (GA → data/GA/, not Texas).")
+    reset.add_argument("--warehouse", type=Path, default=None)
+    reset.add_argument("--state", type=Path, default=None)
 
     download = sub.add_parser("download", help="Bulk-download a free source before scoring.")
     download.add_argument("source", choices=("places", "ppp", "licenses"))
@@ -101,6 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--status", default="selected")
 
     stats = sub.add_parser("stats", help="Print DuckDB warehouse counts and detected tools.")
+    stats.add_argument("--geo", help="State whose warehouse to inspect (GA → data/GA/warehouse.duckdb).")
     stats.add_argument("--warehouse", type=Path, default=None)
 
     doctor = sub.add_parser("doctor", help="Check DuckDB + public Overture S3 access.")
@@ -132,6 +188,29 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _warehouse(args: argparse.Namespace) -> Path:
     return getattr(args, "warehouse", None) or _default_warehouse()
+
+
+def apply_harvest_layout(args: argparse.Namespace) -> argparse.Namespace:
+    """Map --geo onto isolated folders. Texas keeps data/ if that warehouse already exists."""
+    layout = default_harvest_layout(args.geo)
+    if args.warehouse is None:
+        args.warehouse = layout["warehouse"]
+    if args.raw_dir == Path("data/raw"):
+        args.raw_dir = layout["raw_dir"]
+    if args.out_dir == Path("data/exports"):
+        args.out_dir = layout["out_dir"]
+    args.state = args.state or layout["state"]
+    args.log = args.log or layout["log"]
+    return args
+
+
+def _geo_warehouse(args: argparse.Namespace) -> tuple[Path, Path | None]:
+    layout = default_harvest_layout(args.geo) if getattr(args, "geo", None) else None
+    warehouse = args.warehouse or (layout["warehouse"] if layout else _default_warehouse())
+    state = getattr(args, "state", None)
+    if state is None and layout is not None:
+        state = layout["state"]
+    return warehouse, state
 
 
 def _cmd_download(args: argparse.Namespace) -> int:
@@ -301,8 +380,41 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{feed.key:22} {','.join(feed.states):8} {feed.kind:8} {feed.url}")
             print(f"{'':22} {feed.notes}")
         return 0
+    if args.command == "reset":
+        warehouse, state_path = _geo_warehouse(args)
+        path = reset_warehouse(warehouse)
+        if state_path is None:
+            state_path = Path("data/harvest_state.json")
+        if state_path.exists():
+            state_path.unlink()
+        print(json.dumps({"reset": str(path), "state": str(state_path)}, indent=2))
+        return 0
+    if args.command == "harvest":
+        from zaheendata.pipeline.harvest import harvest
+
+        apply_harvest_layout(args)
+        summary = harvest(
+            geo=args.geo,
+            subsector_keys=args.subsector,
+            warehouse=args.warehouse,
+            raw_dir=args.raw_dir,
+            out_dir=args.out_dir,
+            state_path=args.state,
+            log_path=args.log,
+            keep=args.keep,
+            limit=args.limit,
+            crawl=args.crawl,
+            concurrency=args.concurrency,
+            fresh=args.fresh,
+            refetch=args.refetch,
+            workers=args.workers,
+            skip_setup=args.skip_setup,
+        )
+        print(json.dumps(summary, indent=2, default=str))
+        return 0
     if args.command == "stats":
-        print(json.dumps(warehouse_stats(_warehouse(args)), indent=2, default=str))
+        warehouse, _state = _geo_warehouse(args)
+        print(json.dumps(warehouse_stats(warehouse), indent=2, default=str))
         return 0
     if args.command == "doctor":
         try:

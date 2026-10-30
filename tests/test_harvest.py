@@ -1,0 +1,441 @@
+from pathlib import Path
+
+import duckdb
+
+from zaheendata.checkpoint import HarvestState, json_records_ready
+from zaheendata.models import empty_lead
+from zaheendata.pipeline.enrich import enrich_live
+from zaheendata.pipeline.harvest import harvest, ordered_subsectors
+from zaheendata.pipeline.pool import copy_warehouse, merge_worker_warehouse, partition_trades
+from zaheendata.pipeline.ingest import attach_warehouse_overlays, hydrate_from_warehouse, ingest_license_json
+from zaheendata.pipeline.build import persist_leads
+from zaheendata.sources.overture import parquet_file_ready
+from zaheendata.warehouse import connect, reset_warehouse, snapshot_domains
+
+
+def _write_multi_parquet(path: Path) -> None:
+    con = duckdb.connect()
+    con.execute(
+        f"""
+        COPY (
+          SELECT
+            'place-hvac' AS id,
+            'Cool Air HVAC' AS name,
+            'https://coolair.example' AS website,
+            '+15125550100' AS phone,
+            'jane@coolair.example' AS email,
+            '' AS socials,
+            'hvac_service' AS basic_category,
+            'hvac_service' AS taxonomy_primary,
+            'hvac' AS taxonomy_hierarchy,
+            '100 Main' AS address,
+            'Austin' AS city,
+            'TX' AS region,
+            '78701' AS postcode,
+            'US' AS country,
+            NULL AS brand,
+            0.9 AS confidence,
+            'open' AS operating_status,
+            -97.74 AS lng,
+            30.27 AS lat,
+            'plumbing_hvac' AS subsector,
+            '238220' AS naics
+          UNION ALL
+          SELECT
+            'place-elec', 'Spark Electric', 'https://spark.example',
+            '+15125550111', '', '', 'electrical', 'electrical', 'electrical',
+            '200 Main', 'Austin', 'TX', '78702', 'US', NULL, 0.8, 'open',
+            -97.73, 30.28, 'electrical', '238210'
+        ) TO '{path.as_posix()}' (FORMAT PARQUET)
+        """
+    )
+    con.close()
+
+
+def test_ordered_subsectors_puts_licensed_trades_first() -> None:
+    keys = ordered_subsectors()
+    assert keys[:4] == ["plumbing_hvac", "electrical", "beauty_salons", "nail_salons"]
+    assert len(keys) == 17
+
+
+def test_harvest_state_roundtrip(tmp_path: Path) -> None:
+    path = tmp_path / "harvest_state.json"
+    state = HarvestState.load(path)
+    state.data["geo"] = "TX"
+    state.set_phase("crawl:electrical")
+    row = state.subsector("electrical")
+    row["crawled"] = 12
+    state.save()
+    loaded = HarvestState.load(path)
+    assert loaded.data["geo"] == "TX"
+    assert loaded.data["phase"] == "crawl:electrical"
+    assert loaded.subsector("electrical")["crawled"] == 12
+
+
+def test_parquet_and_json_ready_helpers(tmp_path: Path) -> None:
+    missing = tmp_path / "nope.parquet"
+    assert parquet_file_ready(missing) is False
+    parquet = tmp_path / "ok.parquet"
+    _write_multi_parquet(parquet)
+    assert parquet_file_ready(parquet) is True
+    empty = tmp_path / "empty.json"
+    empty.write_text("[]", encoding="utf-8")
+    assert json_records_ready(empty) is False
+    filled = tmp_path / "licenses.json"
+    filled.write_text('[{"source":"tx_tdlr_ac"}]', encoding="utf-8")
+    assert json_records_ready(filled) is True
+
+
+def test_license_sources_do_not_cross_trades(tmp_path: Path) -> None:
+    warehouse = tmp_path / "warehouse.duckdb"
+    licenses = tmp_path / "licenses.json"
+    licenses.write_text(
+        "["
+        '{"source":"tx_tdlr_electrical","business_name":"Cool Air HVAC",'
+        '"owner_name":"Wrong Electrician","owner_is_person":true,'
+        '"license_number":"TECL999","license_status":"active",'
+        '"phone":"","address":"","city_state_zip":"Austin TX","county":"TRAVIS"},'
+        '{"source":"tx_tdlr_ac","business_name":"Cool Air HVAC",'
+        '"owner_name":"Jane Plumber","owner_is_person":true,'
+        '"license_number":"TACLA000","license_status":"active",'
+        '"phone":"","address":"","city_state_zip":"Austin TX","county":"TRAVIS"}'
+        "]",
+        encoding="utf-8",
+    )
+    ingest_license_json(licenses, warehouse, state="TX")
+    hvac = empty_lead(name="Cool Air HVAC", website="https://coolair.example/")
+    attach_warehouse_overlays([hvac], warehouse, allowed_sources={"tx_tdlr_ac"})
+    assert hvac.license_number == "TACLA000"
+    assert hvac.owner_name == "Jane Plumber"
+
+    crossed = empty_lead(name="Cool Air HVAC", website="https://coolair.example/")
+    attach_warehouse_overlays([crossed], warehouse, allowed_sources={"tx_tdlr_electrical"})
+    assert crossed.license_number == "TECL999"
+
+
+def test_hydrate_restores_crawled_fields(tmp_path: Path) -> None:
+    warehouse = tmp_path / "warehouse.duckdb"
+    saved = empty_lead(
+        name="Cool Air HVAC",
+        business_id="place-hvac",
+        domain="coolair.example",
+        website="https://coolair.example/",
+        website_crawled=True,
+        owner_email="jane@coolair.example",
+        tech_stack="jobber,housecall_pro",
+        founded_year="2004",
+    )
+    persist_leads([saved], warehouse)
+    fresh = empty_lead(
+        name="Cool Air HVAC",
+        business_id="place-hvac",
+        domain="coolair.example",
+        website="https://coolair.example/",
+    )
+    hydrate_from_warehouse([fresh], warehouse)
+    assert fresh.website_crawled is True
+    assert fresh.owner_email == "jane@coolair.example"
+    assert "jobber" in fresh.tech_stack
+    assert fresh.founded_year == "2004"
+
+
+def test_enrich_live_skips_domains_already_in_snapshots(tmp_path: Path, monkeypatch) -> None:
+    warehouse = tmp_path / "warehouse.duckdb"
+    con = connect(warehouse)
+    con.execute(
+        "INSERT INTO snapshots VALUES ('coolair.example', 'https://coolair.example/', 'live_crawl', now(), 200, 12, '')"
+    )
+    con.close()
+    seen: list[list[str]] = []
+
+    async def fake_crawl(leads, **_kwargs):
+        seen.append([lead.domain for lead in leads])
+        return leads
+
+    monkeypatch.setattr("zaheendata.pipeline.enrich.crawl_leads", fake_crawl)
+    lead = empty_lead(
+        name="Cool Air HVAC",
+        domain="coolair.example",
+        website="https://coolair.example/",
+    )
+    enrich_live([lead], warehouse=warehouse, concurrency=1)
+    assert seen == [[]]
+    assert lead.website_crawled is True
+    assert "coolair.example" in snapshot_domains(warehouse, successful_only=True)
+
+
+def _seed_raw(raw: Path) -> None:
+    raw.mkdir(parents=True, exist_ok=True)
+    _write_multi_parquet(raw / "overture_all_TX.parquet")
+    for key in ("tx_tdlr_ac", "tx_tdlr_electrical", "tx_tdlr_salon"):
+        (raw / f"{key}.json").write_text(
+            '[{"source":"%s","business_name":"Cool Air HVAC","owner_name":"Jane Plumber",'
+            '"owner_is_person":true,"license_number":"TACLA000","license_status":"active",'
+            '"phone":"","address":"","city_state_zip":"Austin TX","county":"TRAVIS"}]' % key,
+            encoding="utf-8",
+        )
+
+
+def test_harvest_resumes_completed_trade(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    _seed_raw(raw)
+    warehouse = tmp_path / "warehouse.duckdb"
+    out_dir = tmp_path / "exports"
+    state_path = tmp_path / "harvest_state.json"
+    log_path = tmp_path / "harvest.log"
+
+    first = harvest(
+        geo="TX",
+        subsector_keys=["plumbing_hvac", "electrical"],
+        warehouse=warehouse,
+        raw_dir=raw,
+        out_dir=out_dir,
+        state_path=state_path,
+        log_path=log_path,
+        crawl="none",
+        min_full_rows=0,
+    )
+    assert first["stopped"] is False
+    assert first["trades"]["plumbing_hvac"]["status"] == "complete"
+    assert first["trades"]["electrical"]["status"] == "complete"
+    assert (out_dir / "TX_plumbing_hvac.csv").exists()
+    assert (out_dir / "TX_electrical.csv").exists()
+
+    state = HarvestState.load(state_path)
+    assert state.subsector("plumbing_hvac")["status"] == "complete"
+
+    second = harvest(
+        geo="TX",
+        subsector_keys=["plumbing_hvac", "electrical"],
+        warehouse=warehouse,
+        raw_dir=raw,
+        out_dir=out_dir,
+        state_path=state_path,
+        log_path=log_path,
+        crawl="none",
+        min_full_rows=0,
+    )
+    assert second["trades"]["plumbing_hvac"]["status"] == "complete"
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "already complete" in log_text
+    assert "reusing" in log_text
+
+
+def test_harvest_stop_mid_crawl_then_resume(tmp_path: Path, monkeypatch) -> None:
+    raw = tmp_path / "raw"
+    _seed_raw(raw)
+    warehouse = tmp_path / "warehouse.duckdb"
+    out_dir = tmp_path / "exports"
+    state_path = tmp_path / "harvest_state.json"
+    log_path = tmp_path / "harvest.log"
+    calls = {"n": 0}
+
+    def fake_enrich(leads, *, should_stop=None, on_progress=None, warehouse=None, **_kwargs):
+        calls["n"] += 1
+        if leads:
+            lead = leads[0]
+            lead.website_crawled = True
+            lead.extra["crawl_attempted"] = True
+            lead.extra["_html"] = "<script src='https://cdn.shopify.com/s/files/x.js'></script>"
+            if on_progress:
+                on_progress(lead)
+            from zaheendata.pipeline.enrich import checkpoint_live_lead
+
+            checkpoint_live_lead(lead, warehouse)
+        if calls["n"] == 1 and should_stop is not None:
+            should_stop.request_stop()
+        return leads
+
+    monkeypatch.setattr("zaheendata.pipeline.harvest.enrich_live", fake_enrich)
+    paused = harvest(
+        geo="TX",
+        subsector_keys=["plumbing_hvac", "electrical"],
+        warehouse=warehouse,
+        raw_dir=raw,
+        out_dir=out_dir,
+        state_path=state_path,
+        log_path=log_path,
+        crawl="live",
+        min_full_rows=0,
+    )
+    assert paused["stopped"] is True
+    assert "electrical" not in paused["trades"]
+    assert paused["trades"]["plumbing_hvac"]["status"] == "paused"
+    assert HarvestState.load(state_path).subsector("plumbing_hvac")["status"] == "paused"
+
+    resumed = harvest(
+        geo="TX",
+        subsector_keys=["plumbing_hvac", "electrical"],
+        warehouse=warehouse,
+        raw_dir=raw,
+        out_dir=out_dir,
+        state_path=state_path,
+        log_path=log_path,
+        crawl="live",
+        min_full_rows=0,
+    )
+    assert resumed["stopped"] is False
+    assert resumed["trades"]["electrical"]["status"] == "complete"
+    assert calls["n"] >= 2
+
+
+def test_harvest_georgia_does_not_touch_texas_data(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    tx_root = tmp_path / "data"
+    tx_root.mkdir()
+    tx_warehouse = tx_root / "warehouse.duckdb"
+    tx_warehouse.write_text("texas-do-not-touch", encoding="utf-8")
+    tx_log = tx_root / "harvest.log"
+    tx_log.write_text("texas log", encoding="utf-8")
+    tx_state = tx_root / "harvest_state.json"
+    tx_state.write_text('{"geo":"TX"}', encoding="utf-8")
+
+    ga_raw = tmp_path / "data" / "GA" / "raw"
+    ga_raw.mkdir(parents=True)
+    _write_multi_parquet(ga_raw / "overture_all_GA.parquet")
+
+    summary = harvest(
+        geo="GA",
+        subsector_keys=["plumbing_hvac"],
+        warehouse=Path("data/warehouse.duckdb"),
+        raw_dir=Path("data/raw"),
+        out_dir=Path("data/exports"),
+        crawl="none",
+        min_full_rows=0,
+    )
+    assert Path(summary["warehouse"]) == Path("data/GA/warehouse.duckdb")
+    assert Path(summary["raw_dir"]) == Path("data/GA/raw")
+    assert Path(summary["out_dir"]) == Path("data/GA/exports")
+    assert (tmp_path / "data/GA/warehouse.duckdb").exists()
+    assert (tmp_path / "data/GA/exports/GA_plumbing_hvac.csv").exists()
+    assert (tmp_path / "data/GA/harvest.log").exists()
+    log_text = (tmp_path / "data/GA/harvest.log").read_text(encoding="utf-8")
+    assert "no unattended bulk feed for GA" in log_text
+    assert tx_warehouse.read_text(encoding="utf-8") == "texas-do-not-touch"
+    assert tx_log.read_text(encoding="utf-8") == "texas log"
+    assert tx_state.read_text(encoding="utf-8") == '{"geo":"TX"}'
+    assert not (tmp_path / "data/exports").exists()
+
+
+def test_harvest_rhode_island_does_not_touch_texas_or_georgia(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    tx_root = tmp_path / "data"
+    tx_root.mkdir()
+    tx_warehouse = tx_root / "warehouse.duckdb"
+    tx_warehouse.write_text("texas-do-not-touch", encoding="utf-8")
+    ga_root = tx_root / "GA"
+    ga_root.mkdir()
+    ga_warehouse = ga_root / "warehouse.duckdb"
+    ga_warehouse.write_text("georgia-do-not-touch", encoding="utf-8")
+    ga_log = ga_root / "harvest.log"
+    ga_log.write_text("georgia log", encoding="utf-8")
+
+    ri_raw = tmp_path / "data" / "RI" / "raw"
+    ri_raw.mkdir(parents=True)
+    _write_multi_parquet(ri_raw / "overture_all_RI.parquet")
+
+    summary = harvest(
+        geo="RI",
+        subsector_keys=["plumbing_hvac"],
+        warehouse=Path("data/warehouse.duckdb"),
+        raw_dir=Path("data/raw"),
+        out_dir=Path("data/exports"),
+        crawl="none",
+        min_full_rows=0,
+    )
+    assert Path(summary["warehouse"]) == Path("data/RI/warehouse.duckdb")
+    assert Path(summary["raw_dir"]) == Path("data/RI/raw")
+    assert Path(summary["out_dir"]) == Path("data/RI/exports")
+    assert (tmp_path / "data/RI/warehouse.duckdb").exists()
+    assert (tmp_path / "data/RI/exports/RI_plumbing_hvac.csv").exists()
+    log_text = (tmp_path / "data/RI/harvest.log").read_text(encoding="utf-8")
+    assert "no unattended bulk feed for RI" in log_text
+    assert tx_warehouse.read_text(encoding="utf-8") == "texas-do-not-touch"
+    assert ga_warehouse.read_text(encoding="utf-8") == "georgia-do-not-touch"
+    assert ga_log.read_text(encoding="utf-8") == "georgia log"
+    assert not (tmp_path / "data/exports").exists()
+
+
+def test_harvest_refetches_smoke_sample_parquet(tmp_path: Path, monkeypatch) -> None:
+    raw = tmp_path / "raw"
+    _seed_raw(raw)
+    called: dict[str, object] = {}
+
+    def fake_download(**kwargs):
+        called["limit"] = kwargs.get("limit")
+        called["refetch"] = kwargs.get("refetch")
+        return kwargs["out"]
+
+    monkeypatch.setattr("zaheendata.pipeline.harvest.download_overture", fake_download)
+    harvest(
+        geo="TX",
+        subsector_keys=["plumbing_hvac"],
+        warehouse=tmp_path / "warehouse.duckdb",
+        raw_dir=raw,
+        out_dir=tmp_path / "exports",
+        state_path=tmp_path / "harvest_state.json",
+        log_path=tmp_path / "harvest.log",
+        crawl="none",
+        min_full_rows=100,
+    )
+    assert called["limit"] is None
+    assert called["refetch"] is True
+    log_text = (tmp_path / "harvest.log").read_text(encoding="utf-8")
+    assert "smoke-test sample" in log_text
+
+
+def test_partition_keeps_in_progress_trade_on_worker_zero() -> None:
+    keys = ["plumbing_hvac", "electrical", "beauty_salons", "roofing"]
+    state = {
+        "plumbing_hvac": {"status": "running"},
+        "electrical": {"status": "pending"},
+        "beauty_salons": {"status": "pending"},
+        "roofing": {"status": "pending"},
+    }
+    buckets = partition_trades(keys, state, 3)
+    assert buckets[0] == ["plumbing_hvac"]
+    assert "electrical" not in buckets[0]
+    remaining = buckets[1] + buckets[2]
+    assert set(remaining) == {"electrical", "beauty_salons", "roofing"}
+
+
+def test_merge_worker_warehouse_copies_leads(tmp_path: Path) -> None:
+    main = tmp_path / "main.duckdb"
+    worker = tmp_path / "w1.duckdb"
+    lead = empty_lead(
+        name="Spark Electric",
+        business_id="place-elec",
+        domain="spark.example",
+        website="https://spark.example/",
+        website_crawled=True,
+        tech_stack="jobber",
+    )
+    persist_leads([lead], worker)
+    con = connect(worker)
+    con.execute(
+        "INSERT INTO snapshots VALUES ('spark.example', 'https://spark.example/', 'live_crawl', now(), 200, 10, '')"
+    )
+    con.close()
+    copy_warehouse(worker, main)
+    extra = empty_lead(
+        name="Nail Shop",
+        business_id="place-nail",
+        domain="nails.example",
+        website="https://nails.example/",
+        website_crawled=True,
+    )
+    persist_leads([extra], worker)
+    stats = merge_worker_warehouse(main, worker)
+    assert stats["leads"] >= 0
+    con = connect(main)
+    ids = {row[0] for row in con.execute("SELECT business_id FROM leads").fetchall()}
+    con.close()
+    assert "place-nail" in ids
+
+
+def test_reset_warehouse_deletes_db(tmp_path: Path) -> None:
+    warehouse = tmp_path / "warehouse.duckdb"
+    connect(warehouse).close()
+    assert warehouse.exists()
+    reset_warehouse(warehouse)
+    assert not warehouse.exists()

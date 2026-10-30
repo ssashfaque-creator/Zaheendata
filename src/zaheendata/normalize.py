@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse
 
 LEGAL_SUFFIXES = (
     "incorporated",
@@ -174,13 +174,26 @@ DIRECTORY_HOSTS = {
 }
 
 
+def safe_urlparse(value: str | None) -> ParseResult | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        return urlparse(raw)
+    except ValueError:
+        return None
+
+
 def domain_from_url(value: str | None) -> str:
     raw = (value or "").strip()
     if not raw:
         return ""
     if "://" not in raw:
         raw = "https://" + raw
-    host = urlparse(raw).netloc.lower()
+    parsed = safe_urlparse(raw)
+    if parsed is None:
+        return ""
+    host = (parsed.netloc or "").lower()
     if host.startswith("www."):
         host = host[4:]
     return host
@@ -201,8 +214,8 @@ def canonicalize_website(value: str | None) -> str:
         raw = "https:" + raw
     if not re.match(r"^https?://", raw, re.I):
         raw = "https://" + raw
-    parsed = urlparse(raw)
-    if not parsed.netloc:
+    parsed = safe_urlparse(raw)
+    if parsed is None or not parsed.netloc:
         return ""
     scheme = "https"
     netloc = parsed.netloc.lower()

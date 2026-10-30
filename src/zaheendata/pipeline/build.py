@@ -187,6 +187,7 @@ def persist_leads(leads: list[Lead], warehouse: Path | None = None) -> None:
         )
     con = connect(warehouse)
     con.executemany(LEAD_INSERT_SQL, rows)
+    con.execute("CHECKPOINT")
     con.close()
 
 

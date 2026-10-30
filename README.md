@@ -36,14 +36,106 @@ Directory hosts (HomeAdvisor, Angi, Yelp, Facebook, `business.site`, …) are no
 
 ## Setup
 
+On a Mac, without git:
+
 ```bash
+curl -L https://github.com/ssashfaque-creator/Zaheendata/archive/refs/heads/main.zip -o zaheendata.zip
+unzip zaheendata.zip
+cd Zaheendata-main
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
-cp .env.example .env
+pip install -e .
 ```
 
-No API key is required for `download` / `build` on Overture. DuckDB talks to the public S3 bucket with `httpfs`.
+If `main` does not yet have harvest, use the branch zip instead:
+
+```bash
+curl -L https://github.com/ssashfaque-creator/Zaheendata/archive/refs/heads/cursor/texas-statewide-harvest-aa83.zip -o zaheendata.zip
+unzip zaheendata.zip
+cd Zaheendata-cursor-texas-statewide-harvest-aa83
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+No API key is required for `download` / `build` / `harvest` on Overture. DuckDB talks to the public S3 bucket with `httpfs`. Keep the laptop awake with `caffeinate` (shown below) so a long harvest is not suspended.
+
+## Rhode Island statewide harvest (all 17 trades)
+
+Texas is paused under `data/`. Georgia is paused under `data/GA/`. Leave both folders alone. `--geo RI` writes only to `data/RI/`.
+
+Rhode Island DLT contractor lists are $50 per occupation. CRLB is lookup-only. RIDOH salon Excel is free but a website picker, not an API. Harvest still runs: Overture places → owned websites → live crawl → tool detection.
+
+```bash
+# Full state Rhode Island. Do not pass --fresh.
+caffeinate -dims zaheendata harvest --geo RI --workers 4 --concurrency 8
+
+# Stop with Ctrl+C, then the same command resumes from the last saved site:
+caffeinate -dims zaheendata harvest --geo RI --workers 4 --concurrency 8
+
+# Watch Rhode Island only
+tail -f data/RI/harvest.log
+zaheendata stats --geo RI
+```
+
+| Rhode Island file | Path |
+| --- | --- |
+| Warehouse | `data/RI/warehouse.duckdb` |
+| Overture extract | `data/RI/raw/overture_all_RI.parquet` |
+| Progress log | `data/RI/harvest.log` |
+| Checkpoints | `data/RI/harvest_state.json` |
+| CSVs | `data/RI/exports/RI_<trade>.csv` |
+
+`--limit` caps **crawls per trade only**. It does not shrink the Overture download. Rhode Island is small; wait until the log shows the place count before expecting crawl lines.
+
+## Georgia statewide harvest (paused — resume later)
+
+Texas is paused under `data/` — leave that folder alone. `--geo GA` writes only to `data/GA/`.
+
+Georgia SOS contractor and cosmetology rosters are paid files with no public API. Harvest still runs: Overture places → owned websites → live crawl → tool detection. License number / person-owner overlay is skipped until a roster is bought later.
+
+```bash
+# Full state Georgia. Do not pass --fresh (that would wipe a new Georgia warehouse, not Texas).
+caffeinate -dims zaheendata harvest --geo GA --workers 4 --concurrency 8
+
+# Stop with Ctrl+C, then the same command resumes from the last saved site:
+caffeinate -dims zaheendata harvest --geo GA --workers 4 --concurrency 8
+
+# Watch Georgia only (not the Texas log)
+tail -f data/GA/harvest.log
+zaheendata stats --geo GA
+```
+
+| Georgia file | Path |
+| --- | --- |
+| Warehouse | `data/GA/warehouse.duckdb` |
+| Overture extract | `data/GA/raw/overture_all_GA.parquet` |
+| Progress log | `data/GA/harvest.log` |
+| Checkpoints | `data/GA/harvest_state.json` |
+| CSVs | `data/GA/exports/GA_<trade>.csv` |
+
+`--limit` caps **crawls per trade only**. It does not shrink the Overture download. Wait until `data/GA/harvest.log` shows tens of thousands of places before expecting crawl progress.
+
+## Texas statewide harvest (paused — resume later)
+
+Same checkpoints as Georgia. Texas stays in the original `data/` folder if `data/warehouse.duckdb` already exists.
+
+```bash
+# After the first trade is underway, split remaining trades across processes:
+# worker 0 keeps the in-progress trade on the main warehouse; others get copies.
+caffeinate -dims zaheendata harvest --geo TX --workers 4 --concurrency 8
+
+# Stop anytime with Ctrl+C, then continue (never --fresh unless you mean to wipe Texas):
+caffeinate -dims zaheendata harvest --geo TX --workers 4 --concurrency 8
+
+# Watch Texas only
+tail -f data/harvest.log
+zaheendata stats --geo TX
+```
+
+Do **not** pass `--fresh` when resuming. That flag deletes that state's warehouse and `harvest_state.json`. Downloaded Overture files are reused only if they look like a full state extract (100+ places). A leftover `--limit` smoke parquet is discarded automatically.
+
+Exports land in `data/exports/TX_<trade>.csv`. The DuckDB warehouse is the source of truth if a run is interrupted mid-file.
 
 ## Commands
 
@@ -78,7 +170,7 @@ zaheendata diagnose path/to/old-export.csv
 
 ## Warehouse
 
-DuckDB file `data/warehouse.duckdb` (override with `ZAHEENDATA_WAREHOUSE`):
+DuckDB file `data/warehouse.duckdb` for the original Texas run (override with `ZAHEENDATA_WAREHOUSE`). `--geo GA` uses `data/GA/warehouse.duckdb`. `--geo RI` uses `data/RI/warehouse.duckdb`.
 
 - `places` — Overture businesses, including those without a website
 - `licenses` — person owners where a board file exists

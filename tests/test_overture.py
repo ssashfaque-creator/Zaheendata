@@ -32,6 +32,6 @@ def test_download_sql_targets_public_s3(tmp_path) -> None:
     assert str(east) in sql
     assert str(north) in sql
     assert "COPY" in sql
-    assert out.as_posix() in sql
+    assert f"{out.as_posix()}.partial" in sql
     assert "addresses[1].country = 'US'" in sql
     assert "permanently_closed" in sql

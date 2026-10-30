@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from zaheendata.checkpoint import atomic_write_json, json_records_ready
 from zaheendata.sources import tdlr
 
 
@@ -74,22 +75,69 @@ FEEDS: tuple[LicenseFeed, ...] = (
         url="https://data.ny.gov/",
         notes="NY appearance-enhancement business licenses on data.ny.gov.",
     ),
+    LicenseFeed(
+        key="ga_cilb",
+        states=("GA",),
+        subsectors=("plumbing_hvac", "electrical", "remodelers"),
+        kind="manual",
+        url="https://sos.ga.gov/licensing-division-license-lookup",
+        notes="Georgia SOS CILB (conditioned air, electrical, plumber). Bulk rosters are paid; no public API.",
+    ),
+    LicenseFeed(
+        key="ga_cosmetology",
+        states=("GA",),
+        subsectors=("beauty_salons", "nail_salons"),
+        kind="manual",
+        url="https://sos.ga.gov/licensing-division-license-lookup",
+        notes="Georgia Board of Cosmetology and Barbers. Salon/nail rosters are paid SOS files.",
+    ),
+    LicenseFeed(
+        key="ri_dlt_trades",
+        states=("RI",),
+        subsectors=("plumbing_hvac", "electrical"),
+        kind="manual",
+        url="https://www.ri.gov/dlt/bulklicense/",
+        notes="RI DLT professional trades (plumber, electrician, mechanical). $50 per occupation; no public API.",
+    ),
+    LicenseFeed(
+        key="ri_crlb",
+        states=("RI",),
+        subsectors=("remodelers", "roofing", "painting"),
+        kind="manual",
+        url="https://datadbr.ri.gov/crb-search/contractor-search.php",
+        notes="RI Contractors' Registration and Licensing Board. Lookup only; no bulk export.",
+    ),
+    LicenseFeed(
+        key="ri_ridoh_hair",
+        states=("RI",),
+        subsectors=("beauty_salons", "nail_salons"),
+        kind="manual",
+        url="https://health.ri.gov/licensing/licensee-lists",
+        notes="RIDOH hairdressing/barber/shop Excel is free via the website picker, not an unattended bulk API.",
+    ),
 )
 
 
-def download_soda_feed(feed: LicenseFeed, out: Path, county: str | None = None) -> Path:
+def download_soda_feed(
+    feed: LicenseFeed,
+    out: Path,
+    county: str | None = None,
+    *,
+    refetch: bool = False,
+    max_rows: int = 150_000,
+) -> Path:
+    if not refetch and json_records_ready(out):
+        return out
     mapping = {
         "tx_tdlr_ac": "tdlr_ac_contractor",
         "tx_tdlr_electrical": "tdlr_electrical_contractor",
         "tx_tdlr_salon": "tdlr_cosmetology_establishment",
     }
     filt = tdlr.LICENSE_FILTERS[mapping[feed.key]]
-    rows = tdlr.fetch_licenses(license_filter=filt, county=county)
+    rows = tdlr.fetch_licenses(license_filter=filt, county=county, max_rows=max_rows)
     records = list(tdlr.iter_match_records(rows, feed.key))
     out.parent.mkdir(parents=True, exist_ok=True)
-    import json
-
-    out.write_text(json.dumps(records), encoding="utf-8")
+    atomic_write_json(out, records)
     return out
 
 
@@ -100,3 +148,7 @@ def list_feeds(state: str | None = None, subsector: str | None = None) -> list[L
     if subsector:
         feeds = [feed for feed in feeds if subsector in feed.subsectors]
     return feeds
+
+
+def soda_source_keys(state: str | None = None, subsector: str | None = None) -> set[str]:
+    return {feed.key for feed in list_feeds(state=state, subsector=subsector) if feed.kind == "soda"}

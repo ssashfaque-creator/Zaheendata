@@ -16,17 +16,25 @@ def download_overture(
     raw_dir: Path = Path("data/raw"),
     limit: int | None = None,
     out: Path | None = None,
+    refetch: bool = False,
 ) -> Path:
     dest = out or raw_dir / f"{parquet_stem(geo, subsector_key)}.parquet"
-    return download_places(geo=geo, subsector_key=subsector_key, out=dest, limit=limit)
+    return download_places(
+        geo=geo,
+        subsector_key=subsector_key,
+        out=dest,
+        limit=limit,
+        refetch=refetch,
+    )
 
 
 def download_licenses_for(
     *,
     geo: str,
-    subsector_key: str,
+    subsector_key: str | None = None,
     raw_dir: Path = Path("data/raw"),
     county: str | None = None,
+    refetch: bool = False,
 ) -> list[Path]:
     state = state_from_geo(geo)
     written: list[Path] = []
@@ -34,7 +42,7 @@ def download_licenses_for(
         if feed.kind != "soda":
             continue
         dest = raw_dir / f"{feed.key}.json"
-        download_soda_feed(feed, dest, county=county)
+        download_soda_feed(feed, dest, county=county, refetch=refetch)
         written.append(dest)
     return written
 
